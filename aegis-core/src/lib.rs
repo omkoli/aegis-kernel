@@ -1,4 +1,5 @@
 pub mod canonical;
+pub mod delegation;
 pub mod error;
 pub mod issuer;
 pub mod request;
@@ -9,6 +10,7 @@ pub mod token;
 pub mod validation;
 
 pub use canonical::canonical_json;
+pub use delegation::{DelegationRequest, DelegationService};
 pub use error::AegisError;
 pub use issuer::{IssuerConfig, TokenIssuer};
 pub use request::TokenRequest;
