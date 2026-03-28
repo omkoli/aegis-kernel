@@ -1,0 +1,23 @@
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": {
+    "resources": [
+      {
+        "uri": "file:///project/src/main.rs",
+        "name": "main.rs",
+        "mimeType": "text/x-rust"
+      },
+      {
+        "uri": "file:///project/Cargo.toml",
+        "name": "Cargo.toml",
+        "mimeType": "text/plain"
+      },
+      {
+        "uri": "file:///project/README.md",
+        "name": "README.md",
+        "mimeType": "text/markdown"
+      }
+    ]
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "result": {
+    "prompts": [
+      {
+        "name": "code_review",
+        "description": "Review code for best practices and potential issues",
+        "arguments": [
+          {
+            "name": "language",
+            "description": "Programming language of the code",
+            "required": true
+          },
+          {
+            "name": "style_guide",
+            "description": "Style guide to follow",
+            "required": false
+          }
+        ]
+      },
+      {
+        "name": "summarize",
+        "description": "Summarize the given text concisely",
+        "arguments": [
+          {
+            "name": "text",
+            "description": "The text to summarize",
+            "required": true
+          }
+        ]
+      }
+    ]
+  }
+}

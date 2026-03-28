@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 23,
+  "error": {
+    "code": -32603,
+    "message": "Internal error",
+    "data": {
+      "cause": "Database connection pool exhausted",
+      "retryAfter": 5000,
+      "requestId": "req-abc-123"
+    }
+  }
+}

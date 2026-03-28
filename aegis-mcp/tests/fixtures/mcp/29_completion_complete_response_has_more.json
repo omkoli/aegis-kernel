@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "result": {
+    "completion": {
+      "values": ["react", "redis", "redux", "relay", "remix"],
+      "hasMore": true,
+      "total": 23
+    }
+  }
+}

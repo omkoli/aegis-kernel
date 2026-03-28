@@ -1,0 +1,16 @@
+{
+  "jsonrpc": "2.0",
+  "id": 19,
+  "result": {
+    "roots": [
+      {
+        "uri": "file:///home/user/project",
+        "name": "Main Project"
+      },
+      {
+        "uri": "file:///home/user/libs",
+        "name": "Shared Libraries"
+      }
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Hello, world!\nThis is a test file.\n"
+      }
+    ]
+  }
+}
