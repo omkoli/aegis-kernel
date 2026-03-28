@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/enforce", post(enforce))
         .route("/delegate", post(delegate))
         .route("/audit", get(get_audit))
+        .route("/audit/export", get(export_audit_jsonl))
         .with_state(state)
 }
 
@@ -123,10 +124,7 @@ async fn enforce(
     let result = state.engine.enforce(&call);
 
     // Record audit
-    {
-        let mut log = state.audit_log.write().unwrap();
-        log.push(result.audit.clone());
-    }
+    state.audit_log.append(result.audit.clone());
 
     let audit = audit_entry_to_response(&result.audit);
     let decision = match result.decision {
@@ -168,43 +166,66 @@ async fn delegate(
 
 /// Query params for GET /audit.
 #[derive(Debug, Deserialize)]
-pub struct AuditQuery {
+pub struct HttpAuditQuery {
     pub token_id: Option<Uuid>,
     pub agent_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub decision: Option<String>,
+    pub resource_path: Option<String>,
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 /// GET /audit — Query audit log.
 async fn get_audit(
     State(state): State<AppState>,
-    Query(query): Query<AuditQuery>,
+    Query(query): Query<HttpAuditQuery>,
 ) -> Json<Vec<AuditResponse>> {
-    let log = state.audit_log.read().unwrap();
-    let mut entries: Vec<_> = log
-        .iter()
-        .filter(|e| {
-            if let Some(tid) = query.token_id {
-                if e.token_id != tid {
-                    return false;
-                }
-            }
-            if let Some(ref aid) = query.agent_id {
-                if e.agent_id != *aid {
-                    return false;
-                }
-            }
-            true
-        })
-        .collect();
-
-    // Most recent first
-    entries.reverse();
-
-    if let Some(limit) = query.limit {
-        entries.truncate(limit);
+    let mut aq = aegis_audit::AuditQuery::new();
+    if let Some(tid) = query.token_id {
+        aq = aq.token(tid);
     }
+    if let Some(ref aid) = query.agent_id {
+        aq = aq.agent(aid);
+    }
+    if let Some(ref tool) = query.tool_name {
+        aq = aq.tool(tool);
+    }
+    if let Some(ref d) = query.decision {
+        match d.to_lowercase().as_str() {
+            "allow" => aq = aq.decision(aegis_core::Decision::Allow),
+            "deny" => aq = aq.decision(aegis_core::Decision::Deny),
+            _ => {}
+        }
+    }
+    if let Some(ref r) = query.resource_path {
+        aq = aq.resource(r);
+    }
+    let limit = query.limit.unwrap_or(100);
+    let offset = query.offset.unwrap_or(0);
+    aq = aq.page(offset, limit);
 
-    Json(entries.iter().map(|e| audit_entry_to_response(e)).collect())
+    let page = state.audit_log.query(&aq);
+    Json(page.entries.iter().map(audit_entry_to_response).collect())
+}
+
+/// GET /audit/export — Export full audit log as JSON Lines.
+async fn export_audit_jsonl(
+    State(state): State<AppState>,
+) -> (
+    StatusCode,
+    [(axum::http::header::HeaderName, &'static str); 1],
+    String,
+) {
+    let entries = state.audit_log.all();
+    let mut buf = Vec::new();
+    let _ = aegis_audit::JsonLinesExporter::export_entries(&entries, &mut buf);
+    let body = String::from_utf8(buf).unwrap_or_default();
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+        body,
+    )
 }
 
 // ── Error helpers ──────────────────────────────────────────────────────

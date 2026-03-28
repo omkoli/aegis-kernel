@@ -1,8 +1,9 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
+use aegis_audit::{AuditLog, InMemoryAuditStore};
 use aegis_core::{
-    AuditEntry, DelegationService, Ed25519TokenSigner, EnforcementEngine, InMemoryTokenStore,
-    IssuerConfig, TokenIssuer,
+    DelegationService, Ed25519TokenSigner, EnforcementEngine, InMemoryTokenStore, IssuerConfig,
+    TokenIssuer,
 };
 
 /// Shared application state for the management API.
@@ -12,7 +13,7 @@ pub struct AppState {
     pub delegation: Arc<DelegationService<Ed25519TokenSigner, InMemoryTokenStore>>,
     pub engine: Arc<EnforcementEngine<Ed25519TokenSigner, InMemoryTokenStore>>,
     pub store: Arc<InMemoryTokenStore>,
-    pub audit_log: Arc<RwLock<Vec<AuditEntry>>>,
+    pub audit_log: AuditLog,
 }
 
 impl AppState {
@@ -41,12 +42,15 @@ impl AppState {
             Arc::clone(&store),
         ));
 
+        let audit_store = Arc::new(InMemoryAuditStore::new());
+        let audit_log = AuditLog::new(audit_store);
+
         Self {
             issuer,
             delegation,
             engine,
             store,
-            audit_log: Arc::new(RwLock::new(Vec::new())),
+            audit_log,
         }
     }
 }
