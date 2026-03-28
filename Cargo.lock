@@ -54,6 +54,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-gateway"
+version = "0.1.0"
+dependencies = [
+ "aegis-mcp",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "aegis-handle"
 version = "0.1.0"
 dependencies = [
