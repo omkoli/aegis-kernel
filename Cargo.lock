@@ -6,6 +6,7 @@ version = 4
 name = "aegis-api"
 version = "0.1.0"
 dependencies = [
+ "aegis-audit",
  "aegis-core",
  "axum 0.8.8",
  "chrono",
@@ -19,6 +20,20 @@ dependencies = [
  "tonic-build",
  "tower 0.5.3",
  "tower-http",
+ "uuid",
+]
+
+[[package]]
+name = "aegis-audit"
+version = "0.1.0"
+dependencies = [
+ "aegis-core",
+ "chrono",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
  "uuid",
 ]
 

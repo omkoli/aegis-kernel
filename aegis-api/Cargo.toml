@@ -6,6 +6,7 @@ description = "Management API for the Aegis kernel (HTTP + gRPC)"
 
 [dependencies]
 aegis-core = { path = "../aegis-core" }
+aegis-audit = { path = "../aegis-audit" }
 axum = { version = "0.8", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
