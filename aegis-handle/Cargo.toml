@@ -1,0 +1,16 @@
+[package]
+name = "aegis-handle"
+version = "0.1.0"
+edition = "2021"
+description = "KernelHandle — single entry point for MCP Gateway embedding"
+
+[dependencies]
+aegis-core = { path = "../aegis-core" }
+aegis-audit = { path = "../aegis-audit" }
+aegis-policy = { path = "../aegis-policy" }
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"
