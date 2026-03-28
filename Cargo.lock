@@ -67,6 +67,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "aegis-policy"
 version = "0.1.0"
 dependencies = [
