@@ -85,6 +85,18 @@ impl Ed25519TokenSigner {
     pub fn verifying_key(&self) -> VerifyingKey {
         self.signing_key.verifying_key()
     }
+
+    /// Returns the raw 32-byte signing key material.
+    pub fn signing_key_bytes(&self) -> [u8; 32] {
+        self.signing_key.to_bytes()
+    }
+
+    /// Reconstructs a signer from raw 32-byte signing key material.
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self {
+            signing_key: SigningKey::from_bytes(bytes),
+        }
+    }
 }
 
 impl TokenSigner for Ed25519TokenSigner {
