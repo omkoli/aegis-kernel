@@ -3,5 +3,6 @@ pub mod message;
 
 pub use error::{McpError, Result};
 pub use message::{
-    parse_message, JsonRpcError, McpMessage, McpNotification, McpRequest, McpResponse, RequestId,
+    extract_resource_read, extract_tool_call, parse_message, JsonRpcError, McpMessage,
+    McpNotification, McpRequest, McpResponse, RequestId, ResourceReadRequest, ToolCallRequest,
 };

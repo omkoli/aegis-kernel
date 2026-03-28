@@ -1,0 +1,26 @@
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "tools/call",
+  "params": {
+    "name": "create_document",
+    "arguments": {
+      "title": "Project Plan",
+      "metadata": {
+        "author": "aegis",
+        "tags": ["planning", "architecture"],
+        "priority": 1
+      },
+      "sections": [
+        {
+          "heading": "Overview",
+          "content": "This is the project overview."
+        },
+        {
+          "heading": "Timeline",
+          "content": "Q1 2026 milestones."
+        }
+      ]
+    }
+  }
+}

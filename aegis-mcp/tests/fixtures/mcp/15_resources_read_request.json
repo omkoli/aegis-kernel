@@ -1,0 +1,8 @@
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "resources/read",
+  "params": {
+    "uri": "file:///project/src/main.rs"
+  }
+}

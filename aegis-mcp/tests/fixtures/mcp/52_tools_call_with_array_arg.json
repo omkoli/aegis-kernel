@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 26,
+  "method": "tools/call",
+  "params": {
+    "name": "batch_process",
+    "arguments": {
+      "files": ["/tmp/a.txt", "/tmp/b.txt", "/tmp/c.txt"],
+      "operation": "compress"
+    }
+  }
+}

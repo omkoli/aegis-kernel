@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": 14,
+  "result": {
+    "completion": {
+      "values": ["rust", "ruby"],
+      "hasMore": false,
+      "total": 2
+    }
+  }
+}

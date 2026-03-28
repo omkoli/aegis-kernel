@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/progress",
+  "params": {
+    "progressToken": "op-43",
+    "progress": 3,
+    "total": 10,
+    "message": "Processing file 3 of 10..."
+  }
+}

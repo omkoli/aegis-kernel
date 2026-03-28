@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/message",
+  "params": {
+    "level": "info",
+    "logger": "aegis-server",
+    "data": "Connection established successfully"
+  }
+}

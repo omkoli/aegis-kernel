@@ -1,0 +1,18 @@
+{
+  "jsonrpc": "2.0",
+  "id": 18,
+  "method": "sampling/createMessage",
+  "params": {
+    "messages": [
+      {
+        "role": "user",
+        "content": {
+          "type": "text",
+          "text": "Explain monads in simple terms."
+        }
+      }
+    ],
+    "systemPrompt": "You are a helpful programming tutor. Explain concepts simply and use analogies.",
+    "maxTokens": 512
+  }
+}
