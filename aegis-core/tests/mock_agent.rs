@@ -112,7 +112,7 @@ fn scenario_finance_read_db() {
                     },
                 )
                 .unwrap(),
-            ttl: Some(Duration::from_millis(80)), // very short TTL for test
+            ttl: Some(Duration::from_secs(2)), // short TTL for expiry test below
             delegatable: false,
             max_uses: None,
         })
@@ -162,7 +162,7 @@ fn scenario_finance_read_db() {
     assert!(r.audit.reason.contains("constraint violation"));
 
     // 4. DENY after expiry
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(Duration::from_secs(3));
     let r = agent.call(
         &h.engine,
         "query_db",
