@@ -1,5 +1,6 @@
 pub mod canonical;
 pub mod delegation;
+pub mod enforcement;
 pub mod error;
 pub mod issuer;
 pub mod request;
@@ -11,6 +12,7 @@ pub mod validation;
 
 pub use canonical::canonical_json;
 pub use delegation::{DelegationRequest, DelegationService};
+pub use enforcement::{AuditEntry, Decision, EnforcementEngine, EnforcementResult};
 pub use error::AegisError;
 pub use issuer::{IssuerConfig, TokenIssuer};
 pub use request::TokenRequest;
