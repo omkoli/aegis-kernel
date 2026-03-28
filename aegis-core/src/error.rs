@@ -54,4 +54,16 @@ pub enum AegisError {
 
     #[error("signature verification failed: {0}")]
     SignatureInvalid(String),
+
+    #[error("subject must not be empty")]
+    EmptySubject,
+
+    #[error("max_uses must be at least 1")]
+    InvalidMaxUses,
+
+    #[error("TTL {requested_secs}s exceeds maximum allowed {max_secs}s")]
+    TtlExceedsMax { requested_secs: u64, max_secs: u64 },
+
+    #[error("token {id} not found")]
+    TokenNotFound { id: Uuid },
 }

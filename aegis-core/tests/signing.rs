@@ -6,7 +6,16 @@ use std::time::Instant;
 
 fn make_token() -> CapabilityToken {
     let resource = Resource::new("file:///etc/passwd").unwrap();
-    CapabilityToken::new(resource, vec![Action::Read], Constraints::new(), None).unwrap()
+    CapabilityToken::new(
+        "test-user",
+        resource,
+        vec![Action::Read],
+        Constraints::new(),
+        None,
+        false,
+        None,
+    )
+    .unwrap()
 }
 
 fn make_complex_token() -> CapabilityToken {
@@ -23,6 +32,7 @@ fn make_complex_token() -> CapabilityToken {
         .add("format", ParamConstraint::Exact("json".into()))
         .unwrap();
     CapabilityToken::new(
+        "test-user",
         resource,
         vec![
             Action::Read,
@@ -31,6 +41,8 @@ fn make_complex_token() -> CapabilityToken {
         ],
         constraints,
         None,
+        true,
+        Some(10),
     )
     .unwrap()
 }
