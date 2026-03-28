@@ -1,0 +1,14 @@
+[package]
+name = "aegis-gateway"
+version = "0.1.0"
+edition = "2021"
+description = "Transparent MCP proxy engine for the Aegis kernel"
+
+[dependencies]
+aegis-mcp = { path = "../aegis-mcp" }
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+serde_json = "1"
