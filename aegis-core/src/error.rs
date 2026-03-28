@@ -51,4 +51,7 @@ pub enum AegisError {
 
     #[error("deserialization error: {0}")]
     Deserialization(String),
+
+    #[error("signature verification failed: {0}")]
+    SignatureInvalid(String),
 }
