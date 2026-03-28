@@ -61,6 +61,19 @@ pub enum McpMessage {
     Notification(McpNotification),
 }
 
+impl McpMessage {
+    /// Serialize this message to a JSON byte vector.
+    pub fn to_json_bytes(&self) -> Result<Vec<u8>> {
+        let bytes = match self {
+            McpMessage::Request(r) => serde_json::to_vec(r),
+            McpMessage::Response(r) => serde_json::to_vec(r),
+            McpMessage::Notification(n) => serde_json::to_vec(n),
+        }
+        .map_err(McpError::InvalidJson)?;
+        Ok(bytes)
+    }
+}
+
 /// Extracted details from a `tools/call` request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRequest {
