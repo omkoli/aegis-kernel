@@ -1,0 +1,190 @@
+syntax = "proto3";
+
+package aegis;
+
+import "google/protobuf/timestamp.proto";
+
+// ── Core types ─────────────────────────────────────────────────────────
+
+message Resource {
+  string path = 1;
+}
+
+enum Action {
+  ACTION_UNSPECIFIED = 0;
+  ACTION_READ = 1;
+  ACTION_WRITE = 2;
+  ACTION_EXECUTE = 3;
+  ACTION_DELETE = 4;
+}
+
+message CustomAction {
+  string name = 1;
+}
+
+message ActionValue {
+  oneof kind {
+    Action standard = 1;
+    CustomAction custom = 2;
+  }
+}
+
+message ParamConstraint {
+  oneof kind {
+    string exact = 1;
+    OneOfConstraint one_of = 2;
+    string regex = 3;
+    RangeConstraint range = 4;
+  }
+}
+
+message OneOfConstraint {
+  repeated string values = 1;
+}
+
+message RangeConstraint {
+  double min = 1;
+  double max = 2;
+}
+
+message Constraints {
+  map<string, ParamConstraint> params = 1;
+}
+
+// ── Token ──────────────────────────────────────────────────────────────
+
+message CapabilityToken {
+  string id = 1;
+  string subject = 2;
+  Resource resource = 3;
+  repeated ActionValue actions = 4;
+  Constraints constraints = 5;
+  google.protobuf.Timestamp issued_at = 6;
+  google.protobuf.Timestamp expires_at = 7;
+  bool delegatable = 8;
+  optional uint64 max_uses = 9;
+  bool revoked = 10;
+  optional string parent_id = 11;
+}
+
+message SignedToken {
+  CapabilityToken token = 1;
+  string signature_hex = 2;
+}
+
+// ── Requests / Responses ───────────────────────────────────────────────
+
+message IssueTokenRequest {
+  string subject = 1;
+  Resource resource = 2;
+  repeated ActionValue actions = 3;
+  Constraints constraints = 4;
+  optional uint64 ttl_secs = 5;
+  bool delegatable = 6;
+  optional uint64 max_uses = 7;
+}
+
+message IssueTokenResponse {
+  SignedToken signed_token = 1;
+}
+
+message GetTokenRequest {
+  string token_id = 1;
+}
+
+message GetTokenResponse {
+  SignedToken signed_token = 1;
+}
+
+message DeleteTokenRequest {
+  string token_id = 1;
+}
+
+message DeleteTokenResponse {
+  SignedToken signed_token = 1;
+}
+
+message ListTokensRequest {}
+
+message ListTokensResponse {
+  repeated SignedToken tokens = 1;
+}
+
+// ── Audit ──────────────────────────────────────────────────────────────
+
+message AuditEntry {
+  string request_id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  string agent_id = 3;
+  string tool_name = 4;
+  ActionValue action = 5;
+  string resource_path = 6;
+  string token_id = 7;
+  string decision = 8;
+  string reason = 9;
+  repeated string token_chain = 10;
+  uint64 latency_us = 11;
+}
+
+message GetAuditRequest {
+  optional string token_id = 1;
+  optional string agent_id = 2;
+  optional uint32 limit = 3;
+}
+
+message GetAuditResponse {
+  repeated AuditEntry entries = 1;
+}
+
+// ── Enforcement ────────────────────────────────────────────────────────
+
+message EnforceRequest {
+  string agent_id = 1;
+  string tool_name = 2;
+  ActionValue action = 3;
+  Resource resource = 4;
+  map<string, string> parameters = 5;
+  string token_id = 6;
+}
+
+message EnforceResponse {
+  string decision = 1;
+  AuditEntry audit = 2;
+}
+
+// ── Delegation ─────────────────────────────────────────────────────────
+
+message DelegateRequest {
+  string parent_token_id = 1;
+  string new_subject = 2;
+  repeated ActionValue actions = 3;
+  Constraints constraints = 4;
+  bool delegatable = 5;
+  optional uint64 max_uses = 6;
+  optional uint64 ttl_secs = 7;
+}
+
+message DelegateResponse {
+  SignedToken signed_token = 1;
+}
+
+message RevokeRequest {
+  string token_id = 1;
+}
+
+message RevokeResponse {
+  repeated string revoked_ids = 1;
+}
+
+// ── gRPC Service ───────────────────────────────────────────────────────
+
+service AegisService {
+  rpc IssueToken(IssueTokenRequest) returns (IssueTokenResponse);
+  rpc GetToken(GetTokenRequest) returns (GetTokenResponse);
+  rpc DeleteToken(DeleteTokenRequest) returns (DeleteTokenResponse);
+  rpc ListTokens(ListTokensRequest) returns (ListTokensResponse);
+  rpc Enforce(EnforceRequest) returns (EnforceResponse);
+  rpc Delegate(DelegateRequest) returns (DelegateResponse);
+  rpc Revoke(RevokeRequest) returns (RevokeResponse);
+  rpc GetAudit(GetAuditRequest) returns (GetAuditResponse);
+}
