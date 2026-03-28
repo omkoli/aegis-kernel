@@ -19,6 +19,8 @@ pub struct CapabilityToken {
     delegatable: bool,
     max_uses: Option<u64>,
     revoked: bool,
+    /// If this token was derived via delegation, the parent token's ID.
+    parent_id: Option<Uuid>,
 }
 
 impl CapabilityToken {
@@ -36,6 +38,30 @@ impl CapabilityToken {
         expires_at: Option<DateTime<Utc>>,
         delegatable: bool,
         max_uses: Option<u64>,
+    ) -> Result<Self, AegisError> {
+        Self::new_with_parent(
+            subject,
+            resource,
+            actions,
+            constraints,
+            expires_at,
+            delegatable,
+            max_uses,
+            None,
+        )
+    }
+
+    /// Creates a new capability token with an optional parent (for delegation).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_parent(
+        subject: impl Into<String>,
+        resource: Resource,
+        actions: Vec<Action>,
+        constraints: Constraints,
+        expires_at: Option<DateTime<Utc>>,
+        delegatable: bool,
+        max_uses: Option<u64>,
+        parent_id: Option<Uuid>,
     ) -> Result<Self, AegisError> {
         let subject = subject.into();
         if subject.is_empty() {
@@ -67,6 +93,7 @@ impl CapabilityToken {
             delegatable,
             max_uses,
             revoked: false,
+            parent_id,
         })
     }
 
@@ -108,6 +135,10 @@ impl CapabilityToken {
 
     pub fn is_revoked(&self) -> bool {
         self.revoked
+    }
+
+    pub fn parent_id(&self) -> Option<Uuid> {
+        self.parent_id
     }
 
     /// Checks whether this token has expired at the given time.

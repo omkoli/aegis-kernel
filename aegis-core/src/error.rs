@@ -66,4 +66,16 @@ pub enum AegisError {
 
     #[error("token {id} not found")]
     TokenNotFound { id: Uuid },
+
+    #[error("parent token {id} is not delegatable")]
+    NotDelegatable { id: Uuid },
+
+    #[error("delegation scope escalation: {reason}")]
+    ScopeEscalation { reason: String },
+
+    #[error("parent token {id} has been revoked")]
+    ParentRevoked { id: Uuid },
+
+    #[error("parent token {id} has expired")]
+    ParentExpired { id: Uuid },
 }
