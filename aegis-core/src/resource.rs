@@ -116,4 +116,8 @@ impl Constraints {
     pub fn len(&self) -> usize {
         self.params.len()
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &ParamConstraint)> {
+        self.params.iter()
+    }
 }
