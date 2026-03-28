@@ -1,0 +1,16 @@
+[package]
+name = "aegis-policy"
+version = "0.1.0"
+edition = "2021"
+description = "Policy-as-code engine: YAML DSL → TokenRequest compilation with hot-reload"
+
+[dependencies]
+aegis-core = { path = "../aegis-core" }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+notify = { version = "7", features = ["macos_fsevent"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"

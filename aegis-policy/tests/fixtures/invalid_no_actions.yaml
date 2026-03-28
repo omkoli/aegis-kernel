@@ -1,0 +1,5 @@
+policies:
+  - name: no-actions-policy
+    agent: some-agent
+    resource: "db://test"
+    actions: []

@@ -1,0 +1,5 @@
+policies:
+  - name: bad-policy
+    agent: ""
+    resource: "db://test"
+    actions: [read]
