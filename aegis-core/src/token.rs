@@ -10,11 +10,14 @@ use crate::AegisError;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CapabilityToken {
     id: Uuid,
+    subject: String,
     resource: Resource,
     actions: Vec<Action>,
     constraints: Constraints,
     issued_at: DateTime<Utc>,
     expires_at: Option<DateTime<Utc>>,
+    delegatable: bool,
+    max_uses: Option<u64>,
     revoked: bool,
 }
 
@@ -24,12 +27,20 @@ impl CapabilityToken {
     /// # Errors
     /// - `AegisError::NoActions` if `actions` is empty.
     /// - `AegisError::TokenAlreadyExpired` if `expires_at` is in the past.
+    /// - `AegisError::EmptySubject` if `subject` is empty.
     pub fn new(
+        subject: impl Into<String>,
         resource: Resource,
         actions: Vec<Action>,
         constraints: Constraints,
         expires_at: Option<DateTime<Utc>>,
+        delegatable: bool,
+        max_uses: Option<u64>,
     ) -> Result<Self, AegisError> {
+        let subject = subject.into();
+        if subject.is_empty() {
+            return Err(AegisError::EmptySubject);
+        }
         if actions.is_empty() {
             return Err(AegisError::NoActions);
         }
@@ -42,19 +53,29 @@ impl CapabilityToken {
                 });
             }
         }
+        if let Some(0) = max_uses {
+            return Err(AegisError::InvalidMaxUses);
+        }
         Ok(Self {
             id: Uuid::new_v4(),
+            subject,
             resource,
             actions,
             constraints,
             issued_at: now,
             expires_at,
+            delegatable,
+            max_uses,
             revoked: false,
         })
     }
 
     pub fn id(&self) -> Uuid {
         self.id
+    }
+
+    pub fn subject(&self) -> &str {
+        &self.subject
     }
 
     pub fn resource(&self) -> &Resource {
@@ -75,6 +96,14 @@ impl CapabilityToken {
 
     pub fn expires_at(&self) -> Option<DateTime<Utc>> {
         self.expires_at
+    }
+
+    pub fn is_delegatable(&self) -> bool {
+        self.delegatable
+    }
+
+    pub fn max_uses(&self) -> Option<u64> {
+        self.max_uses
     }
 
     pub fn is_revoked(&self) -> bool {

@@ -130,38 +130,101 @@ fn constraints_default_is_empty() {
 fn token_valid_construction() {
     let resource = Resource::new("file:///tmp").unwrap();
     let token = CapabilityToken::new(
+        "alice",
         resource.clone(),
         vec![Action::Read],
         Constraints::new(),
+        None,
+        false,
         None,
     )
     .unwrap();
     assert_eq!(token.resource(), &resource);
     assert_eq!(token.actions(), &[Action::Read]);
+    assert_eq!(token.subject(), "alice");
     assert!(!token.is_revoked());
+    assert!(!token.is_delegatable());
+    assert_eq!(token.max_uses(), None);
 }
 
 #[test]
 fn token_no_actions_rejected() {
     let resource = Resource::new("file:///tmp").unwrap();
-    let err = CapabilityToken::new(resource, vec![], Constraints::new(), None).unwrap_err();
+    let err = CapabilityToken::new(
+        "alice",
+        resource,
+        vec![],
+        Constraints::new(),
+        None,
+        false,
+        None,
+    )
+    .unwrap_err();
     assert!(matches!(err, AegisError::NoActions));
+}
+
+#[test]
+fn token_empty_subject_rejected() {
+    let resource = Resource::new("file:///tmp").unwrap();
+    let err = CapabilityToken::new(
+        "",
+        resource,
+        vec![Action::Read],
+        Constraints::new(),
+        None,
+        false,
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(err, AegisError::EmptySubject));
+}
+
+#[test]
+fn token_zero_max_uses_rejected() {
+    let resource = Resource::new("file:///tmp").unwrap();
+    let err = CapabilityToken::new(
+        "alice",
+        resource,
+        vec![Action::Read],
+        Constraints::new(),
+        None,
+        false,
+        Some(0),
+    )
+    .unwrap_err();
+    assert!(matches!(err, AegisError::InvalidMaxUses));
 }
 
 #[test]
 fn token_past_expiry_rejected() {
     let resource = Resource::new("file:///tmp").unwrap();
     let past = Utc::now() - Duration::hours(1);
-    let err = CapabilityToken::new(resource, vec![Action::Read], Constraints::new(), Some(past))
-        .unwrap_err();
+    let err = CapabilityToken::new(
+        "alice",
+        resource,
+        vec![Action::Read],
+        Constraints::new(),
+        Some(past),
+        false,
+        None,
+    )
+    .unwrap_err();
     assert!(matches!(err, AegisError::TokenAlreadyExpired { .. }));
 }
 
 #[test]
 fn token_revoke_once_ok() {
     let resource = Resource::new("file:///tmp").unwrap();
-    let mut token =
-        CapabilityToken::new(resource, vec![Action::Read], Constraints::new(), None).unwrap();
+    let mut token = CapabilityToken::new(
+        "alice",
+        resource,
+        vec![Action::Read],
+        Constraints::new(),
+        None,
+        false,
+        None,
+    )
+    .unwrap();
     assert!(token.revoke().is_ok());
     assert!(token.is_revoked());
 }
@@ -169,8 +232,16 @@ fn token_revoke_once_ok() {
 #[test]
 fn token_double_revoke_rejected() {
     let resource = Resource::new("file:///tmp").unwrap();
-    let mut token =
-        CapabilityToken::new(resource, vec![Action::Read], Constraints::new(), None).unwrap();
+    let mut token = CapabilityToken::new(
+        "alice",
+        resource,
+        vec![Action::Read],
+        Constraints::new(),
+        None,
+        false,
+        None,
+    )
+    .unwrap();
     token.revoke().unwrap();
     let err = token.revoke().unwrap_err();
     assert!(matches!(err, AegisError::TokenAlreadyRevoked { .. }));
@@ -180,9 +251,12 @@ fn token_double_revoke_rejected() {
 fn token_permits_granted_action() {
     let resource = Resource::new("file:///tmp").unwrap();
     let token = CapabilityToken::new(
+        "alice",
         resource,
         vec![Action::Read, Action::Write],
         Constraints::new(),
+        None,
+        false,
         None,
     )
     .unwrap();
@@ -196,14 +270,49 @@ fn token_is_expired_at() {
     let resource = Resource::new("file:///tmp").unwrap();
     let future = Utc::now() + Duration::hours(1);
     let token = CapabilityToken::new(
+        "alice",
         resource,
         vec![Action::Read],
         Constraints::new(),
         Some(future),
+        false,
+        None,
     )
     .unwrap();
     assert!(!token.is_expired_at(Utc::now()));
     assert!(token.is_expired_at(future + Duration::seconds(1)));
+}
+
+#[test]
+fn token_delegatable_flag() {
+    let resource = Resource::new("file:///tmp").unwrap();
+    let token = CapabilityToken::new(
+        "alice",
+        resource,
+        vec![Action::Read],
+        Constraints::new(),
+        None,
+        true,
+        None,
+    )
+    .unwrap();
+    assert!(token.is_delegatable());
+}
+
+#[test]
+fn token_max_uses() {
+    let resource = Resource::new("file:///tmp").unwrap();
+    let token = CapabilityToken::new(
+        "alice",
+        resource,
+        vec![Action::Read],
+        Constraints::new(),
+        None,
+        false,
+        Some(5),
+    )
+    .unwrap();
+    assert_eq!(token.max_uses(), Some(5));
 }
 
 #[test]
@@ -219,10 +328,13 @@ fn token_serde_roundtrip() {
         )
         .unwrap();
     let token = CapabilityToken::new(
+        "service-a",
         resource,
         vec![Action::Read, Action::custom("query").unwrap()],
         constraints,
         None,
+        true,
+        Some(100),
     )
     .unwrap();
     let json = serde_json::to_string(&token).unwrap();
