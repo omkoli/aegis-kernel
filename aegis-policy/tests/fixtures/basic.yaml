@@ -1,0 +1,25 @@
+policies:
+  - name: finance-agent-db-read
+    agent: finance-agent
+    resource: "db://finance/transactions"
+    actions: [read]
+    constraints:
+      max_amount: 1000
+    ttl: 60s
+    delegatable: false
+    max_uses: 100
+
+  - name: email-agent-send
+    agent: email-agent
+    resource: "email://smtp.corp.com"
+    actions: [execute]
+    constraints:
+      domain:
+        type: one_of
+        values: ["corp.com", "partner.com"]
+      body_length:
+        type: range
+        min: 1
+        max: 10000
+    ttl: 5m
+    delegatable: true

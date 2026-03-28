@@ -1,0 +1,8 @@
+policies:
+  - name: postgres-query
+    agent: data-agent
+    resource:
+      tool: postgres.query
+      provider: postgres
+    actions: [read, write]
+    ttl: 1h

@@ -1,0 +1,9 @@
+policies:
+  - name: same-name
+    agent: agent-1
+    resource: "db://one"
+    actions: [read]
+  - name: same-name
+    agent: agent-2
+    resource: "db://two"
+    actions: [write]
