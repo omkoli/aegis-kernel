@@ -54,6 +54,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-handle"
+version = "0.1.0"
+dependencies = [
+ "aegis-audit",
+ "aegis-core",
+ "aegis-policy",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "aegis-policy"
 version = "0.1.0"
 dependencies = [
