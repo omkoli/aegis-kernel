@@ -8,6 +8,15 @@ description = "Transparent MCP proxy engine for the Aegis kernel"
 aegis-mcp = { path = "../aegis-mcp" }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1"] }
+http-body-util = "0.1"
+bytes = "1"
+reqwest = { version = "0.12", features = ["stream", "json"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+serde_json = "1"
+tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
