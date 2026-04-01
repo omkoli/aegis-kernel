@@ -142,6 +142,19 @@ pub struct ServerConfig {
     /// Optional rate-limit configuration.
     #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
+
+    /// Per-tool rate-limit overrides.
+    ///
+    /// Keys are tool names; values are rate-limit configs applied specifically
+    /// to calls of that tool, checked after the server-level `rate_limit`.
+    ///
+    /// ```toml
+    /// [servers.github.tool_rate_limits.search_repositories]
+    /// max_calls = 10
+    /// window_seconds = 60
+    /// ```
+    #[serde(default)]
+    pub tool_rate_limits: HashMap<String, RateLimitConfig>,
 }
 
 /// Rate-limit configuration for a server.
@@ -300,6 +313,22 @@ pub fn validate(config: &GatewayConfig) -> Result<()> {
                 return Err(ConfigError::Validation(format!(
                     "server '{}': rate_limit.window_seconds must be > 0",
                     name
+                )));
+            }
+        }
+
+        // 6. Per-tool rate limit values must be positive
+        for (tool_name, rl) in &server.tool_rate_limits {
+            if rl.max_calls == 0 {
+                return Err(ConfigError::Validation(format!(
+                    "server '{}': tool_rate_limits['{}'].max_calls must be > 0",
+                    name, tool_name
+                )));
+            }
+            if rl.window_seconds == 0 {
+                return Err(ConfigError::Validation(format!(
+                    "server '{}': tool_rate_limits['{}'].window_seconds must be > 0",
+                    name, tool_name
                 )));
             }
         }
