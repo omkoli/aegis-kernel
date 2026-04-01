@@ -60,6 +60,7 @@ dependencies = [
  "aegis-handle",
  "aegis-mcp",
  "bytes",
+ "dashmap",
  "futures-util",
  "http-body-util",
  "hyper",
