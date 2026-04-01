@@ -40,6 +40,8 @@ use tokio::sync::{broadcast, Notify};
 use tokio_stream::wrappers::BroadcastStream;
 use tracing;
 
+use super::middleware::{block_response, InterceptionMiddleware, InterceptionResult};
+
 /// Errors from the SSE proxy.
 #[derive(Debug, Error)]
 pub enum SseProxyError {
@@ -69,6 +71,12 @@ pub enum SseProxyError {
 
     #[error("proxy shut down")]
     Shutdown,
+
+    #[error("MCP parse error: {0}")]
+    McpParse(#[from] aegis_mcp::McpError),
+
+    #[error("MCP serialization error: {0}")]
+    McpSerialize(String),
 }
 
 pub type Result<T> = std::result::Result<T, SseProxyError>;
@@ -112,6 +120,9 @@ struct ProxyState {
 
     /// Notifies waiting downstream handlers that the upstream endpoint is ready.
     endpoint_ready: Notify,
+
+    /// Optional middleware for intercepting messages.
+    middleware: Option<Arc<dyn InterceptionMiddleware>>,
 }
 
 /// An SSE transport proxy for MCP servers.
@@ -122,11 +133,21 @@ struct ProxyState {
 /// upstream are broadcast to all connected agents.
 pub struct SseProxy {
     config: SseProxyConfig,
+    middleware: Option<Arc<dyn InterceptionMiddleware>>,
 }
 
 impl SseProxy {
     pub fn new(config: SseProxyConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            middleware: None,
+        }
+    }
+
+    /// Attach an interception middleware to the proxy.
+    pub fn with_middleware(mut self, middleware: Arc<dyn InterceptionMiddleware>) -> Self {
+        self.middleware = Some(middleware);
+        self
     }
 
     /// Run the proxy until the provided shutdown signal fires.
@@ -148,6 +169,7 @@ impl SseProxy {
             sse_tx,
             client: reqwest::Client::new(),
             endpoint_ready: Notify::new(),
+            middleware: self.middleware.clone(),
         });
 
         let upstream_state = Arc::clone(&state);
@@ -188,6 +210,7 @@ impl SseProxy {
             sse_tx,
             client: reqwest::Client::new(),
             endpoint_ready: Notify::new(),
+            middleware: self.middleware.clone(),
         });
 
         let listener = TcpListener::bind(self.config.listen_addr)
@@ -312,18 +335,43 @@ impl SseProxy {
                 state.endpoint_ready.notify_waiters();
             }
             _ => {
-                // Forward this SSE event to all downstream agents.
-                // Reconstruct the SSE wire format.
-                let mut sse_bytes = String::new();
-                if let Some(ref et) = event_type {
-                    sse_bytes.push_str(&format!("event: {}\n", et));
-                }
-                for dl in &data_lines {
-                    sse_bytes.push_str(&format!("data: {}\n", dl));
-                }
-                sse_bytes.push('\n');
+                // Run through middleware if present and data looks like JSON-RPC
+                let final_data = if let Some(ref mw) = state.middleware {
+                    if let Ok(message) = aegis_mcp::parse_message(data.as_bytes()) {
+                        match mw.on_response(message) {
+                            InterceptionResult::Forward(msg)
+                            | InterceptionResult::Modify(msg) => {
+                                match msg.to_json_bytes() {
+                                    Ok(bytes) => {
+                                        Some(String::from_utf8_lossy(&bytes).into_owned())
+                                    }
+                                    Err(_) => Some(data.clone()),
+                                }
+                            }
+                            InterceptionResult::Block(_) => {
+                                // Drop the event entirely
+                                None
+                            }
+                        }
+                    } else {
+                        // Not valid JSON-RPC — forward as-is
+                        Some(data.clone())
+                    }
+                } else {
+                    Some(data.clone())
+                };
 
-                let _ = state.sse_tx.send(Bytes::from(sse_bytes));
+                if let Some(final_data) = final_data {
+                    // Reconstruct the SSE wire format.
+                    let mut sse_bytes = String::new();
+                    if let Some(ref et) = event_type {
+                        sse_bytes.push_str(&format!("event: {}\n", et));
+                    }
+                    sse_bytes.push_str(&format!("data: {}\n", final_data));
+                    sse_bytes.push('\n');
+
+                    let _ = state.sse_tx.send(Bytes::from(sse_bytes));
+                }
             }
         }
     }
@@ -478,10 +526,48 @@ impl SseProxy {
             .map_err(|e| SseProxyError::Hyper(Box::new(e)))?
             .to_bytes();
 
+        // Run through middleware if present
+        let forward_bytes = if let Some(ref mw) = state.middleware {
+            let message = aegis_mcp::parse_message(&body_bytes)
+                .map_err(SseProxyError::McpParse)?;
+            match mw.on_request(message) {
+                InterceptionResult::Forward(msg) | InterceptionResult::Modify(msg) => {
+                    let serialized = msg
+                        .to_json_bytes()
+                        .map_err(|e| SseProxyError::McpSerialize(e.to_string()))?;
+                    serialized
+                }
+                InterceptionResult::Block(error) => {
+                    // Re-parse to get the original message for building a response
+                    let original = aegis_mcp::parse_message(&body_bytes)
+                        .map_err(SseProxyError::McpParse)?;
+                    if let Some(err_resp) = block_response(&original, error) {
+                        let err_bytes = err_resp
+                            .to_json_bytes()
+                            .map_err(|e| SseProxyError::McpSerialize(e.to_string()))?;
+                        let response = Response::builder()
+                            .status(StatusCode::OK)
+                            .header("Content-Type", "application/json")
+                            .body(full_body(Bytes::from(err_bytes)))
+                            .unwrap();
+                        return Ok(response);
+                    }
+                    // Notification blocked — return 202 Accepted (nothing to respond with)
+                    let response = Response::builder()
+                        .status(StatusCode::ACCEPTED)
+                        .body(full_body(Bytes::new()))
+                        .unwrap();
+                    return Ok(response);
+                }
+            }
+        } else {
+            body_bytes.to_vec()
+        };
+
         tracing::debug!(
             "forwarding POST to upstream: {} ({} bytes)",
             post_url,
-            body_bytes.len()
+            forward_bytes.len()
         );
 
         // Forward to upstream
@@ -489,7 +575,7 @@ impl SseProxy {
             .client
             .post(&post_url)
             .header("Content-Type", "application/json")
-            .body(body_bytes.to_vec())
+            .body(forward_bytes)
             .send()
             .await
             .map_err(SseProxyError::UpstreamPost)?;

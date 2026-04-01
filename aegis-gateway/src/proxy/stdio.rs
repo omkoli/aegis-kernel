@@ -13,10 +13,13 @@
 //! parse-reserialize that could alter field order or whitespace).
 
 use std::process::Stdio;
+use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
+
+use super::middleware::{block_response, InterceptionMiddleware, InterceptionResult};
 
 /// Errors from the stdio proxy.
 #[derive(Debug, Error)]
@@ -32,6 +35,12 @@ pub enum StdioProxyError {
 
     #[error("server exited with non-zero status: {0}")]
     ServerExit(String),
+
+    #[error("MCP parse error: {0}")]
+    McpParse(#[from] aegis_mcp::McpError),
+
+    #[error("MCP serialization error: {0}")]
+    McpSerialize(String),
 }
 
 /// Result type for the stdio proxy.
@@ -61,11 +70,25 @@ pub struct StdioProxyConfig {
 /// byte-perfect fidelity.
 pub struct StdioProxy {
     config: StdioProxyConfig,
+    middleware: Option<Arc<dyn InterceptionMiddleware>>,
 }
 
 impl StdioProxy {
     pub fn new(config: StdioProxyConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            middleware: None,
+        }
+    }
+
+    /// Attach an interception middleware to the proxy.
+    ///
+    /// When set, messages are parsed, run through the middleware, and
+    /// re-serialized. Without middleware, raw byte forwarding is used
+    /// (byte-perfect fidelity).
+    pub fn with_middleware(mut self, middleware: Arc<dyn InterceptionMiddleware>) -> Self {
+        self.middleware = Some(middleware);
+        self
     }
 
     /// Spawn the MCP server and run the bidirectional proxy.
@@ -107,22 +130,48 @@ impl StdioProxy {
         // Run both directions concurrently. No tokio::spawn needed — both
         // futures execute on the current task via join!, making progress
         // through the async runtime.
-        let (a2s_result, s2a_result) = tokio::join!(
-            forward_lines(
-                BufReader::new(agent_input),
-                server_stdin,
-                "agent→server"
-            ),
-            forward_lines(
-                BufReader::new(server_stdout),
-                agent_output,
-                "server→agent"
-            ),
-        );
+        match &self.middleware {
+            None => {
+                // Raw byte forwarding — byte-perfect fidelity
+                let (a2s_result, s2a_result) = tokio::join!(
+                    forward_lines(
+                        BufReader::new(agent_input),
+                        server_stdin,
+                        "agent→server"
+                    ),
+                    forward_lines(
+                        BufReader::new(server_stdout),
+                        agent_output,
+                        "server→agent"
+                    ),
+                );
+                a2s_result?;
+                s2a_result?;
+            }
+            Some(mw) => {
+                // Middleware path — parse, intercept, re-serialize.
+                // agent_output is shared: the server→agent loop writes
+                // responses, and blocked requests in agent→server also
+                // need to write error responses back to the agent.
+                let shared_agent_output = Arc::new(tokio::sync::Mutex::new(agent_output));
 
-        // Propagate first error
-        a2s_result?;
-        s2a_result?;
+                let (a2s_result, s2a_result) = tokio::join!(
+                    forward_requests_with_middleware(
+                        BufReader::new(agent_input),
+                        server_stdin,
+                        Arc::clone(&shared_agent_output),
+                        Arc::clone(mw),
+                    ),
+                    forward_responses_with_middleware(
+                        BufReader::new(server_stdout),
+                        Arc::clone(&shared_agent_output),
+                        Arc::clone(mw),
+                    ),
+                );
+                a2s_result?;
+                s2a_result?;
+            }
+        }
 
         // Wait for the child to exit
         let status = child.wait().await.map_err(|e| StdioProxyError::Io {
@@ -204,6 +253,150 @@ where
         })?;
     Ok(())
 }
+
+/// Write an MCP message as a newline-delimited JSON line.
+async fn write_message_line<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    message: &McpMessage,
+) -> Result<()> {
+    let mut bytes =
+        message
+            .to_json_bytes()
+            .map_err(|e| StdioProxyError::McpSerialize(e.to_string()))?;
+    bytes.push(b'\n');
+    writer
+        .write_all(&bytes)
+        .await
+        .map_err(|e| StdioProxyError::Io {
+            direction: "write",
+            source: e,
+        })?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| StdioProxyError::Io {
+            direction: "write",
+            source: e,
+        })?;
+    Ok(())
+}
+
+/// Forward agent→server messages through middleware.
+///
+/// Reads lines from agent, parses, runs through `on_request`, then:
+/// - Forward/Modify: serialize and write to server_stdin
+/// - Block: write error response back to agent_output (shared)
+async fn forward_requests_with_middleware<R, W1, W2>(
+    mut reader: BufReader<R>,
+    mut server_writer: W1,
+    agent_output: Arc<tokio::sync::Mutex<W2>>,
+    middleware: Arc<dyn InterceptionMiddleware>,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W1: tokio::io::AsyncWrite + Unpin,
+    W2: tokio::io::AsyncWrite + Unpin,
+{
+    let mut line_buf = Vec::with_capacity(4096);
+    loop {
+        line_buf.clear();
+        let n = reader
+            .read_until(b'\n', &mut line_buf)
+            .await
+            .map_err(|e| StdioProxyError::Io {
+                direction: "agent→server",
+                source: e,
+            })?;
+        if n == 0 {
+            break;
+        }
+
+        let trimmed = line_buf.strip_suffix(b"\n").unwrap_or(&line_buf);
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let message = aegis_mcp::parse_message(trimmed)?;
+
+        match middleware.on_request(message) {
+            InterceptionResult::Forward(msg) | InterceptionResult::Modify(msg) => {
+                write_message_line(&mut server_writer, &msg).await?;
+            }
+            InterceptionResult::Block(error) => {
+                // Build an error response and send it back to the agent.
+                // For notifications (no id), we silently drop.
+                let original = aegis_mcp::parse_message(trimmed)?;
+                if let Some(err_resp) = block_response(&original, error) {
+                    let mut out = agent_output.lock().await;
+                    write_message_line(&mut *out, &err_resp).await?;
+                }
+            }
+        }
+    }
+
+    server_writer
+        .shutdown()
+        .await
+        .map_err(|e| StdioProxyError::Io {
+            direction: "agent→server",
+            source: e,
+        })?;
+    Ok(())
+}
+
+/// Forward server→agent responses through middleware.
+async fn forward_responses_with_middleware<R, W>(
+    mut reader: BufReader<R>,
+    agent_output: Arc<tokio::sync::Mutex<W>>,
+    middleware: Arc<dyn InterceptionMiddleware>,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut line_buf = Vec::with_capacity(4096);
+    loop {
+        line_buf.clear();
+        let n = reader
+            .read_until(b'\n', &mut line_buf)
+            .await
+            .map_err(|e| StdioProxyError::Io {
+                direction: "server→agent",
+                source: e,
+            })?;
+        if n == 0 {
+            break;
+        }
+
+        let trimmed = line_buf.strip_suffix(b"\n").unwrap_or(&line_buf);
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let message = aegis_mcp::parse_message(trimmed)?;
+
+        match middleware.on_response(message) {
+            InterceptionResult::Forward(msg) | InterceptionResult::Modify(msg) => {
+                let mut out = agent_output.lock().await;
+                write_message_line(&mut *out, &msg).await?;
+            }
+            InterceptionResult::Block(_) => {
+                // Silently drop blocked server responses
+            }
+        }
+    }
+
+    let mut out = agent_output.lock().await;
+    out.shutdown()
+        .await
+        .map_err(|e| StdioProxyError::Io {
+            direction: "server→agent",
+            source: e,
+        })?;
+    Ok(())
+}
+
+use aegis_mcp::McpMessage;
 
 #[cfg(test)]
 mod tests {
@@ -569,6 +762,174 @@ done
                 .collect();
             assert!(names.contains(&"read_file"));
             assert!(names.contains(&"write_file"));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Middleware tests
+    // -----------------------------------------------------------------------
+
+    use super::super::middleware::{
+        InterceptionMiddleware, InterceptionResult, PassthroughMiddleware,
+    };
+
+    #[tokio::test]
+    async fn passthrough_middleware_roundtrip() {
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
+        );
+        let mut output = Vec::new();
+
+        let proxy = StdioProxy::new(cat_config())
+            .with_middleware(Arc::new(PassthroughMiddleware));
+        let child = spawn_child("cat", &[]).await;
+        proxy
+            .run_with_child(input.as_bytes(), &mut output, child)
+            .await
+            .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        let lines: Vec<&str> = output_str.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        // Verify each line is valid JSON-RPC
+        for line in &lines {
+            aegis_mcp::parse_message(line.as_bytes()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn passthrough_middleware_with_mock_server() {
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
+        );
+
+        let mut output = Vec::new();
+        let proxy = StdioProxy::new(cat_config())
+            .with_middleware(Arc::new(PassthroughMiddleware));
+        let child = spawn_child("bash", &["-c", MOCK_MCP_SERVER]).await;
+        proxy
+            .run_with_child(input.as_bytes(), &mut output, child)
+            .await
+            .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        let lines: Vec<&str> = output_str.lines().collect();
+        assert_eq!(lines.len(), 2, "expected 2 responses, got: {:?}", lines);
+
+        // Validate initialize response
+        let msg = aegis_mcp::parse_message(lines[0].as_bytes()).unwrap();
+        match msg {
+            aegis_mcp::McpMessage::Response(resp) => {
+                assert_eq!(resp.id, aegis_mcp::RequestId::Number(1));
+                assert_eq!(resp.result.unwrap()["serverInfo"]["name"], "mock-server");
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    /// A middleware that blocks all `tools/call` requests.
+    struct BlockToolCallsMiddleware;
+
+    impl InterceptionMiddleware for BlockToolCallsMiddleware {
+        fn on_request(&self, message: McpMessage) -> InterceptionResult {
+            if message.is_tool_call() {
+                InterceptionResult::Block(aegis_mcp::JsonRpcError {
+                    code: -32600,
+                    message: "tool calls are blocked".into(),
+                    data: None,
+                })
+            } else {
+                InterceptionResult::Forward(message)
+            }
+        }
+
+        fn on_response(&self, message: McpMessage) -> InterceptionResult {
+            InterceptionResult::Forward(message)
+        }
+    }
+
+    #[tokio::test]
+    async fn blocking_middleware_returns_error() {
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"read_file\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
+        );
+
+        let mut output = Vec::new();
+        let proxy = StdioProxy::new(cat_config())
+            .with_middleware(Arc::new(BlockToolCallsMiddleware));
+        let child = spawn_child("cat", &[]).await;
+        proxy
+            .run_with_child(input.as_bytes(), &mut output, child)
+            .await
+            .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        let lines: Vec<&str> = output_str.lines().collect();
+
+        // Should get 2 lines: error for blocked tools/call + echo of ping
+        assert_eq!(lines.len(), 2, "got: {:?}", lines);
+
+        // First line: error response for the blocked tools/call
+        let msg1 = aegis_mcp::parse_message(lines[0].as_bytes()).unwrap();
+        match msg1 {
+            aegis_mcp::McpMessage::Response(resp) => {
+                assert_eq!(resp.id, aegis_mcp::RequestId::Number(1));
+                let err = resp.error.unwrap();
+                assert_eq!(err.code, -32600);
+                assert_eq!(err.message, "tool calls are blocked");
+            }
+            _ => panic!("expected error Response for blocked call"),
+        }
+
+        // Second line: ping was forwarded through cat and came back
+        let msg2 = aegis_mcp::parse_message(lines[1].as_bytes()).unwrap();
+        assert!(matches!(msg2, aegis_mcp::McpMessage::Request(_)));
+    }
+
+    /// A middleware that uppercases the method name of requests.
+    struct UppercaseMethodMiddleware;
+
+    impl InterceptionMiddleware for UppercaseMethodMiddleware {
+        fn on_request(&self, message: McpMessage) -> InterceptionResult {
+            match message {
+                McpMessage::Request(mut req) => {
+                    req.method = req.method.to_uppercase();
+                    InterceptionResult::Modify(McpMessage::Request(req))
+                }
+                other => InterceptionResult::Forward(other),
+            }
+        }
+
+        fn on_response(&self, message: McpMessage) -> InterceptionResult {
+            InterceptionResult::Forward(message)
+        }
+    }
+
+    #[tokio::test]
+    async fn modifying_middleware_alters_message() {
+        let input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
+        let mut output = Vec::new();
+
+        let proxy = StdioProxy::new(cat_config())
+            .with_middleware(Arc::new(UppercaseMethodMiddleware));
+        let child = spawn_child("cat", &[]).await;
+        proxy
+            .run_with_child(input.as_bytes(), &mut output, child)
+            .await
+            .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        let msg = aegis_mcp::parse_message(output_str.trim().as_bytes()).unwrap();
+        match msg {
+            aegis_mcp::McpMessage::Request(req) => {
+                assert_eq!(req.method, "PING");
+            }
+            _ => panic!("expected Request"),
         }
     }
 }
