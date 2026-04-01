@@ -40,6 +40,17 @@ pub const AEGIS_ERROR_CONSTRAINT_VIOLATION: i64 = -32006;
 /// The method in the request is not recognized for translation.
 pub const AEGIS_ERROR_UNKNOWN_METHOD: i64 = -32007;
 
+/// The agent has exceeded its configured rate limit for this server or tool.
+///
+/// Error data includes `retry_after_ms`: milliseconds the caller should wait
+/// before retrying. For SSE transports the gateway also sets a `Retry-After`
+/// HTTP header on the response.
+///
+/// Note: the architecture spec references -32002 for this error, but that slot
+/// is occupied by [`AEGIS_ERROR_TOKEN_EXPIRED`]. -32009 is used to preserve
+/// backward compatibility.
+pub const AEGIS_ERROR_RATE_LIMITED: i64 = -32009;
+
 // ---------------------------------------------------------------------------
 // AgentContext
 // ---------------------------------------------------------------------------
