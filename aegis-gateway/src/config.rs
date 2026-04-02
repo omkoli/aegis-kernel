@@ -12,6 +12,7 @@
 //! [servers.github]
 //! command = "npx @modelcontextprotocol/server-github"
 //! transport = "stdio"
+//! identity_strategy = "process"
 //! env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
 //! allowed_tools = ["search_repositories", "get_file_contents"]
 //!
@@ -23,6 +24,11 @@
 //! [servers.github.tools.search_repositories.rate_limit]
 //! max_calls = 10
 //! window_seconds = 60
+//!
+//! [servers.slack]
+//! url = "https://mcp.slack.example.com/sse"
+//! transport = "sse"
+//! identity_strategy = "header"
 //! ```
 
 use std::collections::HashMap;
@@ -121,6 +127,33 @@ fn default_log_level() -> String {
     "info".into()
 }
 
+/// Which strategy the gateway uses to resolve an agent's identity on this server.
+///
+/// Corresponds to the three [`crate::identity::AgentIdentifier`] implementations.
+///
+/// ```toml
+/// [servers.github]
+/// identity_strategy = "header"
+/// ```
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum IdentityStrategy {
+    /// Identify by parent process name and PID (default).
+    ///
+    /// Suitable for stdio transports and local/single-user setups.
+    #[default]
+    Process,
+    /// Identify by the `X-Aegis-Agent-Id` HTTP header.
+    ///
+    /// Suitable for SSE transports with multiple concurrent agents.
+    Header,
+    /// Identify by an Aegis session token in the `X-Aegis-Token` header.
+    ///
+    /// Full validation against the kernel session store is a Phase 2 feature;
+    /// the current stub extracts and prefixes the token value.
+    Token,
+}
+
 /// Configuration for a single MCP server behind the gateway.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
@@ -147,6 +180,12 @@ pub struct ServerConfig {
     /// Optional rate-limit configuration.
     #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
+
+    /// Strategy for resolving agent identity on connections to this server.
+    ///
+    /// Default: `"process"` (parent process name + PID).
+    #[serde(default)]
+    pub identity_strategy: IdentityStrategy,
 
     /// Per-tool rate-limit overrides (legacy flat form).
     ///
@@ -1063,5 +1102,75 @@ transport = "stdio"
         );
 
         std::env::remove_var("AEGIS_TEST_CMD_7291");
+    }
+
+    // -----------------------------------------------------------------------
+    // 24. identity_strategy: defaults to process
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn identity_strategy_defaults_to_process() {
+        let toml = r#"
+[gateway]
+listen = "127.0.0.1:8080"
+
+[servers.test]
+command = "echo"
+transport = "stdio"
+"#;
+        let config = load_str(toml).unwrap();
+        assert_eq!(config.servers["test"].identity_strategy, IdentityStrategy::Process);
+    }
+
+    // -----------------------------------------------------------------------
+    // 25. identity_strategy: header and token variants parse correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn identity_strategy_header_parsed() {
+        let toml = r#"
+[gateway]
+listen = "127.0.0.1:8080"
+
+[servers.test]
+url = "https://mcp.example.com/sse"
+transport = "sse"
+identity_strategy = "header"
+"#;
+        let config = load_str(toml).unwrap();
+        assert_eq!(config.servers["test"].identity_strategy, IdentityStrategy::Header);
+    }
+
+    #[test]
+    fn identity_strategy_token_parsed() {
+        let toml = r#"
+[gateway]
+listen = "127.0.0.1:8080"
+
+[servers.test]
+url = "https://mcp.example.com/sse"
+transport = "sse"
+identity_strategy = "token"
+"#;
+        let config = load_str(toml).unwrap();
+        assert_eq!(config.servers["test"].identity_strategy, IdentityStrategy::Token);
+    }
+
+    // -----------------------------------------------------------------------
+    // 26. identity_strategy: invalid value produces TOML parse error
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn identity_strategy_invalid_value_rejected() {
+        let toml = r#"
+[gateway]
+listen = "127.0.0.1:8080"
+
+[servers.test]
+command = "echo"
+transport = "stdio"
+identity_strategy = "magic"
+"#;
+        assert!(load_str(toml).is_err());
     }
 }
