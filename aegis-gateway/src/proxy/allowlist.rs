@@ -297,6 +297,7 @@ mod tests {
             allowed_tools: allowed_tools.into_iter().map(String::from).collect(),
             rate_limit: None,
             tool_rate_limits: HashMap::new(),
+            tools: HashMap::new(),
         }
     }
 
@@ -309,6 +310,7 @@ mod tests {
             allowed_tools: allowed_tools.into_iter().map(String::from).collect(),
             rate_limit: None,
             tool_rate_limits: HashMap::new(),
+            tools: HashMap::new(),
         }
     }
 

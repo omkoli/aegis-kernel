@@ -95,10 +95,14 @@ struct TokenBucket {
 
 impl TokenBucket {
     /// Create a new full bucket for `max_calls` calls per `window_seconds`.
-    fn new(max_calls: u64, window_seconds: u64) -> Self {
-        let capacity = max_calls as f64;
+    ///
+    /// `burst_size` extra tokens are added on top of `max_calls` as the initial
+    /// (and maximum) capacity, allowing short bursts above the steady-state rate.
+    fn new(max_calls: u64, window_seconds: u64, burst_size: u64) -> Self {
+        let capacity = (max_calls + burst_size) as f64;
+        // Refill is based on the steady-state rate only (max_calls / window).
         // Guard against zero window (already validated by config, but be safe).
-        let refill_rate = capacity / window_seconds.max(1) as f64;
+        let refill_rate = max_calls.max(1) as f64 / window_seconds.max(1) as f64;
         Self {
             capacity,
             tokens: capacity, // start full
@@ -144,6 +148,15 @@ impl TokenBucket {
         }
         self.tokens -= 1.0;
         None
+    }
+
+    /// Current remaining tokens (after a refill tick), clamped to zero.
+    ///
+    /// This value is advisory — it may change between the call and any
+    /// subsequent `try_consume`. Use it only for metrics / observability.
+    fn remaining_tokens(&mut self) -> f64 {
+        self.refill();
+        self.tokens.max(0.0)
     }
 
     /// Force-set the token count (test helper only).
@@ -203,10 +216,11 @@ impl RateLimiter {
     pub fn check_and_consume(&self, agent_id: &str, tool_name: &str) -> Option<Duration> {
         // ── Phase 1: peek at both buckets (no tokens consumed yet) ──────────
         let server_wait = self.server_limit.as_ref().and_then(|limit| {
+            let burst = limit.burst_size.unwrap_or(0);
             let mut guard = self.agent_buckets.lock().unwrap();
             let bucket = guard
                 .entry(agent_id.to_string())
-                .or_insert_with(|| TokenBucket::new(limit.max_calls, limit.window_seconds));
+                .or_insert_with(|| TokenBucket::new(limit.max_calls, limit.window_seconds, burst));
             bucket.peek_wait()
         });
 
@@ -215,10 +229,11 @@ impl RateLimiter {
         }
 
         let tool_wait = self.tool_limits.get(tool_name).and_then(|limit| {
+            let burst = limit.burst_size.unwrap_or(0);
             let mut guard = self.agent_tool_buckets.lock().unwrap();
             let bucket = guard
                 .entry((agent_id.to_string(), tool_name.to_string()))
-                .or_insert_with(|| TokenBucket::new(limit.max_calls, limit.window_seconds));
+                .or_insert_with(|| TokenBucket::new(limit.max_calls, limit.window_seconds, burst));
             bucket.peek_wait()
         });
 
@@ -228,18 +243,20 @@ impl RateLimiter {
 
         // ── Phase 2: both buckets have tokens — consume from each ────────────
         if let Some(ref limit) = self.server_limit {
+            let burst = limit.burst_size.unwrap_or(0);
             let mut guard = self.agent_buckets.lock().unwrap();
             let bucket = guard
                 .entry(agent_id.to_string())
-                .or_insert_with(|| TokenBucket::new(limit.max_calls, limit.window_seconds));
+                .or_insert_with(|| TokenBucket::new(limit.max_calls, limit.window_seconds, burst));
             bucket.try_consume();
         }
 
         if let Some(limit) = self.tool_limits.get(tool_name) {
+            let burst = limit.burst_size.unwrap_or(0);
             let mut guard = self.agent_tool_buckets.lock().unwrap();
             let bucket = guard
                 .entry((agent_id.to_string(), tool_name.to_string()))
-                .or_insert_with(|| TokenBucket::new(limit.max_calls, limit.window_seconds));
+                .or_insert_with(|| TokenBucket::new(limit.max_calls, limit.window_seconds, burst));
             bucket.try_consume();
         }
 
@@ -251,6 +268,21 @@ impl RateLimiter {
         self.server_limit.is_none() && self.tool_limits.is_empty()
     }
 
+    /// Current remaining server-level tokens for `agent_id`, or `None` if
+    /// there is no server-level limit configured.
+    ///
+    /// The value is advisory (it may change before the next call) and is
+    /// intended for metrics / observability only.
+    pub fn remaining_server_tokens(&self, agent_id: &str) -> Option<f64> {
+        let limit = self.server_limit.as_ref()?;
+        let burst = limit.burst_size.unwrap_or(0);
+        let mut guard = self.agent_buckets.lock().unwrap();
+        let bucket = guard
+            .entry(agent_id.to_string())
+            .or_insert_with(|| TokenBucket::new(limit.max_calls, limit.window_seconds, burst));
+        Some(bucket.remaining_tokens())
+    }
+
     /// The server name this limiter is associated with.
     pub fn server_name(&self) -> &str {
         &self.server_name
@@ -260,10 +292,11 @@ impl RateLimiter {
     #[cfg(test)]
     pub fn set_agent_tokens(&self, agent_id: &str, tokens: f64) {
         if let Some(ref limit) = self.server_limit {
+            let burst = limit.burst_size.unwrap_or(0);
             let mut guard = self.agent_buckets.lock().unwrap();
             let bucket = guard
                 .entry(agent_id.to_string())
-                .or_insert_with(|| TokenBucket::new(limit.max_calls, limit.window_seconds));
+                .or_insert_with(|| TokenBucket::new(limit.max_calls, limit.window_seconds, burst));
             bucket.set_tokens(tokens);
         }
     }
@@ -272,10 +305,11 @@ impl RateLimiter {
     #[cfg(test)]
     pub fn set_agent_tool_tokens(&self, agent_id: &str, tool_name: &str, tokens: f64) {
         if let Some(limit) = self.tool_limits.get(tool_name) {
+            let burst = limit.burst_size.unwrap_or(0);
             let mut guard = self.agent_tool_buckets.lock().unwrap();
             let bucket = guard
                 .entry((agent_id.to_string(), tool_name.to_string()))
-                .or_insert_with(|| TokenBucket::new(limit.max_calls, limit.window_seconds));
+                .or_insert_with(|| TokenBucket::new(limit.max_calls, limit.window_seconds, burst));
             bucket.set_tokens(tokens);
         }
     }
@@ -332,38 +366,62 @@ impl InterceptionMiddleware for RateLimiterMiddleware {
             return InterceptionResult::Forward(message);
         }
 
+        let server = self.limiter.server_name().to_string();
+
         match self.limiter.check_and_consume(&self.agent_id, &tool_name) {
             None => {
                 tracing::debug!(
                     agent_id = %self.agent_id,
-                    server_name = %self.limiter.server_name(),
+                    server_name = %server,
                     tool_name = %tool_name,
                     "rate_limiter: allowed"
                 );
+                metrics::counter!(
+                    crate::metrics::RATE_LIMIT_TOTAL,
+                    "outcome" => "allowed",
+                    "server" => server.clone(),
+                    "tool" => tool_name.clone(),
+                )
+                .increment(1);
+                if let Some(remaining) = self.limiter.remaining_server_tokens(&self.agent_id) {
+                    metrics::gauge!(
+                        crate::metrics::RATE_LIMIT_REMAINING,
+                        "agent_id" => self.agent_id.clone(),
+                        "server" => server.clone(),
+                    )
+                    .set(remaining as f64);
+                }
                 InterceptionResult::Forward(message)
             }
             Some(wait) => {
                 let retry_after_ms = wait.as_millis() as u64;
                 tracing::warn!(
                     agent_id = %self.agent_id,
-                    server_name = %self.limiter.server_name(),
+                    server_name = %server,
                     tool_name = %tool_name,
                     retry_after_ms = retry_after_ms,
                     "rate_limiter: rate limited"
                 );
+                metrics::counter!(
+                    crate::metrics::RATE_LIMIT_TOTAL,
+                    "outcome" => "denied",
+                    "server" => server.clone(),
+                    "tool" => tool_name.clone(),
+                )
+                .increment(1);
                 InterceptionResult::Block(JsonRpcError {
                     code: AEGIS_ERROR_RATE_LIMITED,
                     message: format!(
                         "rate limit exceeded for agent '{}' on '{}::{}'; retry after {}ms",
                         self.agent_id,
-                        self.limiter.server_name(),
+                        server,
                         tool_name,
                         retry_after_ms
                     ),
                     data: Some(serde_json::json!({
                         "aegis": true,
                         "decision": "rate_limited",
-                        "server": self.limiter.server_name(),
+                        "server": server,
                         "tool": tool_name,
                         "agent": self.agent_id,
                         "retry_after_ms": retry_after_ms,
@@ -404,7 +462,7 @@ mod tests {
     fn server_limiter(max_calls: u64, window_seconds: u64) -> Arc<RateLimiter> {
         Arc::new(RateLimiter::new(
             "test-server",
-            Some(RateLimitConfig { max_calls, window_seconds }),
+            Some(RateLimitConfig { max_calls, window_seconds, burst_size: None }),
             HashMap::new(),
         ))
     }
@@ -419,11 +477,11 @@ mod tests {
         let mut tool_limits = HashMap::new();
         tool_limits.insert(
             tool.to_string(),
-            RateLimitConfig { max_calls: tool_max, window_seconds: tool_window },
+            RateLimitConfig { max_calls: tool_max, window_seconds: tool_window, burst_size: None },
         );
         Arc::new(RateLimiter::new(
             "test-server",
-            Some(RateLimitConfig { max_calls: server_max, window_seconds: server_window }),
+            Some(RateLimitConfig { max_calls: server_max, window_seconds: server_window, burst_size: None }),
             tool_limits,
         ))
     }
@@ -438,7 +496,7 @@ mod tests {
 
     #[test]
     fn token_bucket_starts_full() {
-        let mut b = TokenBucket::new(5, 60);
+        let mut b = TokenBucket::new(5, 60, 0);
         // First 5 calls should all succeed
         for _ in 0..5 {
             assert!(b.try_consume().is_none(), "expected None (allowed)");
@@ -451,7 +509,7 @@ mod tests {
 
     #[test]
     fn token_bucket_exhausted_returns_wait() {
-        let mut b = TokenBucket::new(3, 60);
+        let mut b = TokenBucket::new(3, 60, 0);
         for _ in 0..3 {
             b.try_consume();
         }
@@ -469,7 +527,7 @@ mod tests {
 
     #[test]
     fn token_bucket_peek_does_not_consume() {
-        let mut b = TokenBucket::new(2, 60);
+        let mut b = TokenBucket::new(2, 60, 0);
         assert!(b.peek_wait().is_none());
         assert!(b.peek_wait().is_none()); // still none after two peeks
         b.try_consume();
@@ -486,7 +544,7 @@ mod tests {
     #[test]
     fn token_bucket_refills_over_time() {
         // 1 call / 1 second → refill rate = 1 token/s
-        let mut b = TokenBucket::new(1, 1);
+        let mut b = TokenBucket::new(1, 1, 0);
         b.try_consume(); // drain
         assert!(b.try_consume().is_some(), "should be exhausted");
         // After 1.1 s the bucket should have refilled to ≥ 1 token
@@ -635,7 +693,52 @@ mod tests {
     // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
-    // 12. Middleware: non-tool-call messages always pass through
+    // 12. burst_size allows calls above max_calls
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn burst_size_allows_extra_calls() {
+        // max_calls=2, burst=1 → capacity=3
+        let limiter = Arc::new(RateLimiter::new(
+            "test-server",
+            Some(RateLimitConfig { max_calls: 2, window_seconds: 60, burst_size: Some(1) }),
+            HashMap::new(),
+        ));
+        // First 3 calls (max+burst) should pass
+        assert!(limiter.check_and_consume("agent", "tool").is_none(), "call 1 must pass");
+        assert!(limiter.check_and_consume("agent", "tool").is_none(), "call 2 must pass");
+        assert!(limiter.check_and_consume("agent", "tool").is_none(), "call 3 (burst) must pass");
+        // 4th call must be blocked
+        assert!(
+            limiter.check_and_consume("agent", "tool").is_some(),
+            "call 4 must be rate-limited"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 13. remaining_server_tokens reflects consumed tokens
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn remaining_server_tokens_decrements() {
+        let limiter = server_limiter(5, 60);
+        let initial = limiter.remaining_server_tokens("agent").unwrap();
+        assert!(initial >= 4.9, "bucket should start nearly full, got {initial}");
+
+        limiter.check_and_consume("agent", "tool");
+        limiter.check_and_consume("agent", "tool");
+        let after = limiter.remaining_server_tokens("agent").unwrap();
+        assert!(after < initial, "remaining must decrease after consumption");
+    }
+
+    #[test]
+    fn remaining_server_tokens_none_when_unconstrained() {
+        let limiter = no_limit_limiter();
+        assert!(limiter.remaining_server_tokens("agent").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 14. Middleware: non-tool-call messages always pass through
     // -----------------------------------------------------------------------
 
     #[test]

@@ -35,6 +35,51 @@ pub trait InterceptionMiddleware: Send + Sync {
     fn on_response(&self, message: McpMessage) -> InterceptionResult;
 }
 
+/// A chain of [`InterceptionMiddleware`] implementations applied in order.
+///
+/// Each middleware in the chain sees the message in turn. The first middleware
+/// that returns [`InterceptionResult::Block`] short-circuits the chain; no
+/// subsequent middlewares are invoked.  If a middleware returns
+/// [`InterceptionResult::Modify`] the modified message is passed to the next
+/// middleware rather than the original.
+///
+/// An empty chain forwards every message unchanged.
+pub struct MiddlewareChain {
+    middlewares: Vec<std::sync::Arc<dyn InterceptionMiddleware>>,
+}
+
+impl MiddlewareChain {
+    /// Create a new chain from an ordered list of middlewares.
+    pub fn new(middlewares: Vec<std::sync::Arc<dyn InterceptionMiddleware>>) -> Self {
+        Self { middlewares }
+    }
+
+    fn run<F>(&self, message: McpMessage, apply: F) -> InterceptionResult
+    where
+        F: Fn(&dyn InterceptionMiddleware, McpMessage) -> InterceptionResult,
+    {
+        let mut current = message;
+        for mw in &self.middlewares {
+            match apply(mw.as_ref(), current) {
+                InterceptionResult::Forward(m) => current = m,
+                InterceptionResult::Modify(m) => current = m,
+                block @ InterceptionResult::Block(_) => return block,
+            }
+        }
+        InterceptionResult::Forward(current)
+    }
+}
+
+impl InterceptionMiddleware for MiddlewareChain {
+    fn on_request(&self, message: McpMessage) -> InterceptionResult {
+        self.run(message, |mw, msg| mw.on_request(msg))
+    }
+
+    fn on_response(&self, message: McpMessage) -> InterceptionResult {
+        self.run(message, |mw, msg| mw.on_response(msg))
+    }
+}
+
 /// A middleware that forwards every message unchanged.
 ///
 /// Useful as a default or for testing the middleware pipeline.
@@ -79,6 +124,8 @@ pub fn block_response(message: &McpMessage, error: JsonRpcError) -> Option<McpMe
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use aegis_mcp::{McpNotification, McpRequest, RequestId};
 
@@ -163,6 +210,138 @@ mod tests {
             }
             _ => panic!("expected Response"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // MiddlewareChain tests
+    // -----------------------------------------------------------------------
+
+    /// A middleware that blocks every request with the given error code.
+    struct BlockingMiddleware(i64);
+    impl InterceptionMiddleware for BlockingMiddleware {
+        fn on_request(&self, _message: McpMessage) -> InterceptionResult {
+            InterceptionResult::Block(JsonRpcError {
+                code: self.0,
+                message: "blocked".into(),
+                data: None,
+            })
+        }
+        fn on_response(&self, message: McpMessage) -> InterceptionResult {
+            InterceptionResult::Forward(message)
+        }
+    }
+
+    /// A middleware that modifies every request by changing its method.
+    struct ModifyingMiddleware(&'static str);
+    impl InterceptionMiddleware for ModifyingMiddleware {
+        fn on_request(&self, message: McpMessage) -> InterceptionResult {
+            if let McpMessage::Request(mut req) = message {
+                req.method = self.0.to_string();
+                InterceptionResult::Modify(McpMessage::Request(req))
+            } else {
+                InterceptionResult::Forward(message)
+            }
+        }
+        fn on_response(&self, message: McpMessage) -> InterceptionResult {
+            InterceptionResult::Forward(message)
+        }
+    }
+
+    fn make_request(method: &str) -> McpMessage {
+        McpMessage::Request(McpRequest {
+            jsonrpc: "2.0".into(),
+            id: RequestId::Number(1),
+            method: method.to_string(),
+            params: None,
+        })
+    }
+
+    #[test]
+    fn empty_chain_forwards() {
+        let chain = MiddlewareChain::new(vec![]);
+        let msg = make_request("tools/list");
+        assert!(matches!(chain.on_request(msg), InterceptionResult::Forward(_)));
+    }
+
+    #[test]
+    fn single_passthrough_in_chain() {
+        let chain = MiddlewareChain::new(vec![Arc::new(PassthroughMiddleware)]);
+        let msg = make_request("tools/list");
+        assert!(matches!(chain.on_request(msg), InterceptionResult::Forward(_)));
+    }
+
+    #[test]
+    fn blocking_middleware_short_circuits() {
+        let chain = MiddlewareChain::new(vec![
+            Arc::new(BlockingMiddleware(-32008)),
+            Arc::new(PassthroughMiddleware),
+        ]);
+        let result = chain.on_request(make_request("tools/call"));
+        match result {
+            InterceptionResult::Block(err) => assert_eq!(err.code, -32008),
+            other => panic!("expected Block, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn first_block_prevents_second_middleware() {
+        // Second middleware would block with a different code; first blocks first.
+        let chain = MiddlewareChain::new(vec![
+            Arc::new(BlockingMiddleware(-1)),
+            Arc::new(BlockingMiddleware(-2)),
+        ]);
+        let result = chain.on_request(make_request("tools/call"));
+        match result {
+            InterceptionResult::Block(err) => assert_eq!(err.code, -1),
+            other => panic!("expected Block(-1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn modify_result_passed_to_next_middleware() {
+        // First middleware renames method to "modified"; second would block any
+        // method called "original" but passes "modified" — so no block expected.
+        struct BlockIfOriginal;
+        impl InterceptionMiddleware for BlockIfOriginal {
+            fn on_request(&self, message: McpMessage) -> InterceptionResult {
+                if let McpMessage::Request(ref req) = message {
+                    if req.method == "original" {
+                        return InterceptionResult::Block(JsonRpcError {
+                            code: -99,
+                            message: "blocked original".into(),
+                            data: None,
+                        });
+                    }
+                }
+                InterceptionResult::Forward(message)
+            }
+            fn on_response(&self, message: McpMessage) -> InterceptionResult {
+                InterceptionResult::Forward(message)
+            }
+        }
+
+        let chain = MiddlewareChain::new(vec![
+            Arc::new(ModifyingMiddleware("modified")),
+            Arc::new(BlockIfOriginal),
+        ]);
+        let result = chain.on_request(make_request("original"));
+        // First mw renamed it to "modified", so BlockIfOriginal passes it through
+        assert!(matches!(result, InterceptionResult::Forward(_)));
+    }
+
+    #[test]
+    fn chain_on_response_passes_through() {
+        let chain = MiddlewareChain::new(vec![
+            Arc::new(PassthroughMiddleware),
+            Arc::new(PassthroughMiddleware),
+        ]);
+        let resp = McpMessage::Response(McpResponse {
+            jsonrpc: "2.0".into(),
+            id: RequestId::Number(1),
+            result: Some(serde_json::json!({})),
+            error: None,
+        });
+        assert!(matches!(chain.on_response(resp), InterceptionResult::Forward(_)));
     }
 
     #[test]

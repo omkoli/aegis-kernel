@@ -23,6 +23,7 @@ toml = "0.8"
 notify = "7"
 tracing = "0.1"
 dashmap = "6"
+metrics = "0.23"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

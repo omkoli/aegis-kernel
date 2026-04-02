@@ -18,6 +18,11 @@
 //! [servers.github.rate_limit]
 //! max_calls = 100
 //! window_seconds = 60
+//! burst_size = 10
+//!
+//! [servers.github.tools.search_repositories.rate_limit]
+//! max_calls = 10
+//! window_seconds = 60
 //! ```
 
 use std::collections::HashMap;
@@ -143,7 +148,7 @@ pub struct ServerConfig {
     #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
 
-    /// Per-tool rate-limit overrides.
+    /// Per-tool rate-limit overrides (legacy flat form).
     ///
     /// Keys are tool names; values are rate-limit configs applied specifically
     /// to calls of that tool, checked after the server-level `rate_limit`.
@@ -153,17 +158,46 @@ pub struct ServerConfig {
     /// max_calls = 10
     /// window_seconds = 60
     /// ```
+    ///
+    /// Prefer `tools` for new configs — it is more extensible.
     #[serde(default)]
     pub tool_rate_limits: HashMap<String, RateLimitConfig>,
+
+    /// Per-tool configuration (extensible form).
+    ///
+    /// Supersedes `tool_rate_limits` for the same tool name.
+    ///
+    /// ```toml
+    /// [servers.github.tools.search_repositories.rate_limit]
+    /// max_calls = 10
+    /// window_seconds = 60
+    /// burst_size = 2
+    /// ```
+    #[serde(default)]
+    pub tools: HashMap<String, ToolConfig>,
 }
 
-/// Rate-limit configuration for a server.
+/// Rate-limit configuration for a server or tool.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
-    /// Maximum number of calls in the window.
+    /// Maximum steady-state calls in the window.
     pub max_calls: u64,
     /// Window duration in seconds.
     pub window_seconds: u64,
+    /// Extra burst tokens above `max_calls` (optional).
+    ///
+    /// When set, the token bucket capacity is `max_calls + burst_size`, allowing
+    /// a short burst above the steady-state rate before throttling kicks in.
+    #[serde(default)]
+    pub burst_size: Option<u64>,
+}
+
+/// Per-tool configuration (rate limits, future: other overrides).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ToolConfig {
+    /// Optional rate-limit override for this specific tool.
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +272,23 @@ fn substitute_config_env_vars(config: &mut GatewayConfig) -> Result<()> {
 // Validation
 // ---------------------------------------------------------------------------
 
+/// Check that a `RateLimitConfig` has sensible values.
+fn validate_rate_limit_config(rl: &RateLimitConfig, context: &str) -> Result<()> {
+    if rl.max_calls == 0 {
+        return Err(ConfigError::Validation(format!(
+            "{}: max_calls must be > 0",
+            context
+        )));
+    }
+    if rl.window_seconds == 0 {
+        return Err(ConfigError::Validation(format!(
+            "{}: window_seconds must be > 0",
+            context
+        )));
+    }
+    Ok(())
+}
+
 /// Validate a parsed config. Returns `Ok(())` or the first validation error.
 pub fn validate(config: &GatewayConfig) -> Result<()> {
     // 1. listen must be a valid socket address
@@ -303,33 +354,24 @@ pub fn validate(config: &GatewayConfig) -> Result<()> {
 
         // 5. Rate limit values must be positive
         if let Some(ref rl) = server.rate_limit {
-            if rl.max_calls == 0 {
-                return Err(ConfigError::Validation(format!(
-                    "server '{}': rate_limit.max_calls must be > 0",
-                    name
-                )));
-            }
-            if rl.window_seconds == 0 {
-                return Err(ConfigError::Validation(format!(
-                    "server '{}': rate_limit.window_seconds must be > 0",
-                    name
-                )));
-            }
+            validate_rate_limit_config(rl, &format!("server '{}'", name))?;
         }
 
-        // 6. Per-tool rate limit values must be positive
+        // 6. Per-tool rate limit values must be positive (legacy field)
         for (tool_name, rl) in &server.tool_rate_limits {
-            if rl.max_calls == 0 {
-                return Err(ConfigError::Validation(format!(
-                    "server '{}': tool_rate_limits['{}'].max_calls must be > 0",
-                    name, tool_name
-                )));
-            }
-            if rl.window_seconds == 0 {
-                return Err(ConfigError::Validation(format!(
-                    "server '{}': tool_rate_limits['{}'].window_seconds must be > 0",
-                    name, tool_name
-                )));
+            validate_rate_limit_config(
+                rl,
+                &format!("server '{}': tool_rate_limits['{}']", name, tool_name),
+            )?;
+        }
+
+        // 7. Per-tool config (extensible field)
+        for (tool_name, tool_cfg) in &server.tools {
+            if let Some(ref rl) = tool_cfg.rate_limit {
+                validate_rate_limit_config(
+                    rl,
+                    &format!("server '{}': tools['{}'].rate_limit", name, tool_name),
+                )?;
             }
         }
     }
@@ -401,6 +443,15 @@ impl ConfigWatcher {
                 match event.kind {
                     EventKind::Modify(_) | EventKind::Create(_) => {}
                     _ => return,
+                }
+
+                // Skip reload if the file is empty — this can happen transiently
+                // when a writer truncates the file before writing new content.
+                if std::fs::metadata(&path_clone)
+                    .map(|m| m.len() == 0)
+                    .unwrap_or(false)
+                {
+                    return;
                 }
 
                 match load_file(&path_clone) {
@@ -914,7 +965,83 @@ listen = "127.0.0.1:8888"
     }
 
     // -----------------------------------------------------------------------
-    // 20. Env var in command field
+    // 20. burst_size parsed and accessible
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rate_limit_burst_size_parsed() {
+        let toml = r#"
+[gateway]
+listen = "127.0.0.1:8080"
+
+[servers.test]
+command = "echo"
+transport = "stdio"
+
+[servers.test.rate_limit]
+max_calls = 10
+window_seconds = 60
+burst_size = 5
+"#;
+        let config = load_str(toml).unwrap();
+        let rl = config.servers["test"].rate_limit.as_ref().unwrap();
+        assert_eq!(rl.max_calls, 10);
+        assert_eq!(rl.window_seconds, 60);
+        assert_eq!(rl.burst_size, Some(5));
+    }
+
+    // -----------------------------------------------------------------------
+    // 21. tools per-tool rate limit parsed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tools_per_tool_rate_limit_parsed() {
+        let toml = r#"
+[gateway]
+listen = "127.0.0.1:8080"
+
+[servers.github]
+command = "npx server"
+transport = "stdio"
+
+[servers.github.tools.search_repositories.rate_limit]
+max_calls = 10
+window_seconds = 60
+burst_size = 2
+"#;
+        let config = load_str(toml).unwrap();
+        let tool_cfg = &config.servers["github"].tools["search_repositories"];
+        let rl = tool_cfg.rate_limit.as_ref().unwrap();
+        assert_eq!(rl.max_calls, 10);
+        assert_eq!(rl.window_seconds, 60);
+        assert_eq!(rl.burst_size, Some(2));
+    }
+
+    // -----------------------------------------------------------------------
+    // 22. tools per-tool rate limit zero max_calls rejected
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tools_per_tool_rate_limit_zero_max_calls_rejected() {
+        let toml = r#"
+[gateway]
+listen = "127.0.0.1:8080"
+
+[servers.github]
+command = "npx server"
+transport = "stdio"
+
+[servers.github.tools.bad_tool.rate_limit]
+max_calls = 0
+window_seconds = 60
+"#;
+        let err = load_str(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("max_calls"), "got: {msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 23. Env var in command field
     // -----------------------------------------------------------------------
 
     #[test]
