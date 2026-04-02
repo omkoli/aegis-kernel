@@ -231,12 +231,25 @@ pub struct RateLimitConfig {
     pub burst_size: Option<u64>,
 }
 
-/// Per-tool configuration (rate limits, future: other overrides).
+/// Per-tool configuration (rate limits, audit redaction overrides).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ToolConfig {
     /// Optional rate-limit override for this specific tool.
     #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
+
+    /// Parameter field names whose values may be logged without redaction.
+    ///
+    /// By default **all** parameter values are replaced with `"[REDACTED]"` in
+    /// the audit log.  List field names here that are safe to store (e.g.
+    /// non-sensitive counts, sort keys, or public identifiers).
+    ///
+    /// ```toml
+    /// [servers.github.tools.search_repositories]
+    /// safe_log_fields = ["query", "sort", "per_page"]
+    /// ```
+    #[serde(default)]
+    pub safe_log_fields: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

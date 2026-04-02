@@ -1,9 +1,15 @@
+pub mod audit;
 pub mod config;
 pub mod identity;
 pub mod metrics;
 pub mod proxy;
 pub mod ratelimit;
 
+pub use audit::{
+    genesis_hash, hash_record, new_trace_id, redact_parameters, spawn_audit_writer, verify_chain,
+    AuditDecision, AuditError, AuditRecord, AuditWriterConfig, AuditWriterHandle, UpstreamStatus,
+    GENESIS_INPUT,
+};
 pub use config::IdentityStrategy;
 pub use identity::{
     AgentIdentifier, ConnectionContext, HeaderAgentIdentifier, ProcessAgentIdentifier,
