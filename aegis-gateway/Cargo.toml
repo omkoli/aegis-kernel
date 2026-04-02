@@ -7,7 +7,7 @@ description = "Transparent MCP proxy engine for the Aegis kernel"
 [dependencies]
 aegis-mcp = { path = "../aegis-mcp" }
 aegis-handle = { path = "../aegis-handle" }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 hyper = { version = "1", features = ["server", "http1"] }
@@ -24,6 +24,9 @@ notify = "7"
 tracing = "0.1"
 dashmap = "6"
 metrics = "0.23"
+sha2 = "0.10"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
