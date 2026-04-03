@@ -262,11 +262,20 @@ impl SseProxy {
             .get(url)
             .send()
             .await
-            .map_err(SseProxyError::UpstreamConnect)?;
+            .map_err(|e| {
+                tracing::error!(error = %e, upstream_url = %url, "upstream SSE connection failed");
+                SseProxyError::UpstreamConnect(e)
+            })?;
 
         if !response.status().is_success() {
+            let status = response.status();
+            tracing::error!(
+                status = %status,
+                upstream_url = %url,
+                "upstream SSE server returned non-success status"
+            );
             return Err(SseProxyError::UpstreamStatus(
-                StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
             ));
         }
 
@@ -278,7 +287,13 @@ impl SseProxy {
                 chunk = stream.next() => {
                     let chunk = match chunk {
                         Some(Ok(c)) => c,
-                        Some(Err(e)) => return Err(SseProxyError::UpstreamStream(e)),
+                        Some(Err(e)) => {
+                            tracing::error!(
+                                error = %e,
+                                "upstream SSE stream error"
+                            );
+                            return Err(SseProxyError::UpstreamStream(e));
+                        }
                         None => break, // stream ended
                     };
 
@@ -492,7 +507,27 @@ impl SseProxy {
     }
 
     /// Handle `POST /message` — forward the agent's JSON-RPC request upstream.
+    ///
+    /// Each POST gets a per-request tracing span with a `trace_id` so that
+    /// the enforcement log, upstream request, and upstream response can all
+    /// be correlated in a single query.
     async fn handle_post(
+        state: Arc<ProxyState>,
+        req: Request<Incoming>,
+    ) -> Result<Response<BoxBody>> {
+        use tracing::Instrument as _;
+        let trace_id = crate::new_trace_id();
+        let span = tracing::info_span!(
+            "sse.post",
+            trace_id = %trace_id,
+            tool     = tracing::field::Empty,
+            agent    = tracing::field::Empty,
+            decision = tracing::field::Empty,
+        );
+        Self::handle_post_inner(state, req).instrument(span).await
+    }
+
+    async fn handle_post_inner(
         state: Arc<ProxyState>,
         req: Request<Incoming>,
     ) -> Result<Response<BoxBody>> {
@@ -507,6 +542,10 @@ impl SseProxy {
                     tokio::select! {
                         _ = state.endpoint_ready.notified() => {}
                         _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                            tracing::error!(
+                                timeout_secs = 10,
+                                "upstream endpoint timeout: no endpoint event received"
+                            );
                             return Err(SseProxyError::NoEndpoint);
                         }
                     }
@@ -529,7 +568,10 @@ impl SseProxy {
         // Run through middleware if present
         let forward_bytes = if let Some(ref mw) = state.middleware {
             let message = aegis_mcp::parse_message(&body_bytes)
-                .map_err(SseProxyError::McpParse)?;
+                .map_err(|e| {
+                    tracing::error!(error = %e, "malformed MCP message in SSE POST body");
+                    SseProxyError::McpParse(e)
+                })?;
             match mw.on_request(message) {
                 InterceptionResult::Forward(msg) | InterceptionResult::Modify(msg) => {
                     let serialized = msg
@@ -564,10 +606,10 @@ impl SseProxy {
             body_bytes.to_vec()
         };
 
-        tracing::debug!(
-            "forwarding POST to upstream: {} ({} bytes)",
-            post_url,
-            forward_bytes.len()
+        tracing::info!(
+            upstream_url = %post_url,
+            body_bytes   = forward_bytes.len(),
+            "forwarding tool call to upstream MCP server"
         );
 
         // Forward to upstream
@@ -578,14 +620,26 @@ impl SseProxy {
             .body(forward_bytes)
             .send()
             .await
-            .map_err(SseProxyError::UpstreamPost)?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "upstream POST request failed");
+                SseProxyError::UpstreamPost(e)
+            })?;
 
         let status =
             StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let resp_body = upstream_resp
             .bytes()
             .await
-            .map_err(SseProxyError::UpstreamPost)?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "failed reading upstream POST response body");
+                SseProxyError::UpstreamPost(e)
+            })?;
+
+        tracing::info!(
+            upstream_status = %status,
+            response_bytes  = resp_body.len(),
+            "upstream MCP server response received"
+        );
 
         let response = Response::builder()
             .status(status)
