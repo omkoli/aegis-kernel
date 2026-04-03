@@ -200,6 +200,14 @@ impl AllowlistMiddleware {
             reason = reason,
             "allowlist: blocked request"
         );
+        metrics::counter!(
+            crate::metrics::TOOL_CALLS_TOTAL,
+            "server"   => self.server_name.clone(),
+            "tool"     => tool_name.to_string(),
+            "decision" => "allowlist_blocked",
+            "agent"    => self.agent_id.clone(),
+        )
+        .increment(1);
         InterceptionResult::Block(JsonRpcError {
             code: AEGIS_ERROR_NOT_ALLOWED,
             message: format!(

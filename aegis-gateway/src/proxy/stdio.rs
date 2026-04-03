@@ -21,6 +21,22 @@ use tokio::process::{Child, Command};
 
 use super::middleware::{block_response, InterceptionMiddleware, InterceptionResult};
 
+/// RAII guard that decrements `aegis_active_connections{transport="stdio"}` on drop.
+struct ConnectionGuard;
+
+impl ConnectionGuard {
+    fn new() -> Self {
+        metrics::gauge!(crate::metrics::ACTIVE_CONNECTIONS, "transport" => "stdio").increment(1.0);
+        Self
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        metrics::gauge!(crate::metrics::ACTIVE_CONNECTIONS, "transport" => "stdio").decrement(1.0);
+    }
+}
+
 /// Errors from the stdio proxy.
 #[derive(Debug, Error)]
 pub enum StdioProxyError {
@@ -118,6 +134,10 @@ impl StdioProxy {
         R: tokio::io::AsyncRead + Unpin,
         W: tokio::io::AsyncWrite + Unpin,
     {
+        // Track active stdio connections for `aegis_active_connections`.
+        // The guard auto-decrements when this method returns (normal or error).
+        let _conn_guard = ConnectionGuard::new();
+
         let server_stdin = child
             .stdin
             .take()
