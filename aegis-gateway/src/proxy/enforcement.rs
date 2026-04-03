@@ -25,6 +25,7 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use aegis_handle::{Action, Decision, KernelHandle, Resource, ToolCallRequest};
 use aegis_mcp::translate::{translate_to_intent, AgentContext, IntentKind, AEGIS_ERROR_DENIED};
@@ -49,6 +50,7 @@ pub struct EnforcementMiddleware {
     kernel: Arc<KernelHandle>,
     agent_id: String,
     token_id: Uuid,
+    server_name: String,
 }
 
 impl EnforcementMiddleware {
@@ -62,7 +64,17 @@ impl EnforcementMiddleware {
             kernel,
             agent_id: agent_id.into(),
             token_id,
+            server_name: "unknown".to_string(),
         }
+    }
+
+    /// Set the MCP server name for metric labels.
+    ///
+    /// Call this when constructing the middleware to populate the `server`
+    /// label on `aegis_tool_calls_total` and related metrics.
+    pub fn with_server_name(mut self, server_name: impl Into<String>) -> Self {
+        self.server_name = server_name.into();
+        self
     }
 }
 
@@ -108,7 +120,12 @@ impl InterceptionMiddleware for EnforcementMiddleware {
             token_id: self.token_id,
         };
 
+        let call_start = Instant::now();
         let result = self.kernel.evaluate(&tcr);
+        let call_elapsed = call_start.elapsed().as_secs_f64();
+
+        // ── Enforcement duration (from kernel's own latency_us measurement) ──
+        let enforcement_secs = result.audit.latency_us as f64 / 1_000_000.0;
 
         match result.decision {
             Decision::Allow => {
@@ -118,6 +135,25 @@ impl InterceptionMiddleware for EnforcementMiddleware {
                     audit_id = %result.audit.request_id,
                     "enforcement: allowed"
                 );
+                metrics::counter!(
+                    crate::metrics::TOOL_CALLS_TOTAL,
+                    "server"   => self.server_name.clone(),
+                    "tool"     => intent.tool_name.clone(),
+                    "decision" => "allow",
+                    "agent"    => self.agent_id.clone(),
+                )
+                .increment(1);
+                metrics::histogram!(
+                    crate::metrics::ENFORCEMENT_DURATION_SECONDS,
+                    "decision" => "allow",
+                )
+                .record(enforcement_secs);
+                metrics::histogram!(
+                    crate::metrics::TOOL_CALL_DURATION_SECONDS,
+                    "server" => self.server_name.clone(),
+                    "tool"   => intent.tool_name.clone(),
+                )
+                .record(call_elapsed);
                 InterceptionResult::Forward(message)
             }
             Decision::Deny => {
@@ -127,6 +163,25 @@ impl InterceptionMiddleware for EnforcementMiddleware {
                     reason = %result.audit.reason,
                     "enforcement: denied"
                 );
+                metrics::counter!(
+                    crate::metrics::TOOL_CALLS_TOTAL,
+                    "server"   => self.server_name.clone(),
+                    "tool"     => intent.tool_name.clone(),
+                    "decision" => "deny",
+                    "agent"    => self.agent_id.clone(),
+                )
+                .increment(1);
+                metrics::histogram!(
+                    crate::metrics::ENFORCEMENT_DURATION_SECONDS,
+                    "decision" => "deny",
+                )
+                .record(enforcement_secs);
+                metrics::histogram!(
+                    crate::metrics::TOOL_CALL_DURATION_SECONDS,
+                    "server" => self.server_name.clone(),
+                    "tool"   => intent.tool_name.clone(),
+                )
+                .record(call_elapsed);
                 InterceptionResult::Block(JsonRpcError {
                     code: AEGIS_ERROR_DENIED,
                     message: result.audit.reason.clone(),

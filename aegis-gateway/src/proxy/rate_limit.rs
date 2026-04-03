@@ -409,6 +409,21 @@ impl InterceptionMiddleware for RateLimiterMiddleware {
                     "tool" => tool_name.clone(),
                 )
                 .increment(1);
+                metrics::counter!(
+                    crate::metrics::RATE_LIMIT_REJECTIONS_TOTAL,
+                    "server" => server.clone(),
+                    "agent"  => self.agent_id.clone(),
+                )
+                .increment(1);
+                // Also count as a tool call with decision="rate_limited" for unified dashboard queries.
+                metrics::counter!(
+                    crate::metrics::TOOL_CALLS_TOTAL,
+                    "server"   => server.clone(),
+                    "tool"     => tool_name.clone(),
+                    "decision" => "rate_limited",
+                    "agent"    => self.agent_id.clone(),
+                )
+                .increment(1);
                 InterceptionResult::Block(JsonRpcError {
                     code: AEGIS_ERROR_RATE_LIMITED,
                     message: format!(

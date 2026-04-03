@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .route("/delegate", post(delegate))
         .route("/audit", get(get_audit))
         .route("/audit/export", get(export_audit_jsonl))
+        .route("/metrics", get(metrics_handler))
         .with_state(state)
 }
 
@@ -56,6 +57,7 @@ async fn issue_token(
         .issuer
         .issue(request)
         .map_err(|e| bad_request(e.to_string()))?;
+    metrics::gauge!("aegis_tokens_active").set(state.store.list().len() as f64);
     let response = signed_token_to_response(&signed);
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -87,6 +89,7 @@ async fn delete_token(
         .store
         .delete(id)
         .map_err(|e: aegis_core::AegisError| not_found(e.to_string()))?;
+    metrics::gauge!("aegis_tokens_active").set(state.store.list().len() as f64);
     Ok(Json(signed_token_to_response(&signed)))
 }
 
@@ -99,6 +102,7 @@ async fn revoke_token(
         .delegation
         .revoke_cascade(id)
         .map_err(|e| bad_request(e.to_string()))?;
+    metrics::gauge!("aegis_tokens_active").set(state.store.list().len() as f64);
     Ok(Json(RevokeResponse { revoked_ids }))
 }
 
@@ -224,6 +228,25 @@ async fn export_audit_jsonl(
     (
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+        body,
+    )
+}
+
+/// GET /metrics — Prometheus text-format metrics snapshot.
+///
+/// Compatible with any Prometheus scraper or `curl` for manual inspection.
+/// Returns `Content-Type: text/plain; version=0.0.4` as required by the
+/// Prometheus exposition format.
+async fn metrics_handler(
+    State(state): State<AppState>,
+) -> (StatusCode, [(axum::http::header::HeaderName, &'static str); 1], String) {
+    let body = state.prometheus.render();
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
     )
 }
