@@ -288,6 +288,22 @@ impl RateLimiter {
         &self.server_name
     }
 
+    /// Returns the fraction (0.0–1.0) of the server-level quota **consumed**
+    /// by `agent_id`, or `None` if no server-level limit is configured.
+    ///
+    /// A value above `0.8` means more than 80 % of the window has been used
+    /// and the gateway should emit a WARN log so operators can react before
+    /// the agent starts receiving `-32009` rejections.
+    pub fn server_usage_fraction(&self, agent_id: &str) -> Option<f64> {
+        let limit = self.server_limit.as_ref()?;
+        let capacity = (limit.max_calls + limit.burst_size.unwrap_or(0)) as f64;
+        if capacity <= 0.0 {
+            return None;
+        }
+        let remaining = self.remaining_server_tokens(agent_id)?;
+        Some((1.0 - remaining / capacity).clamp(0.0, 1.0))
+    }
+
     /// Directly manipulate an agent's server-level token count (test helper).
     #[cfg(test)]
     pub fn set_agent_tokens(&self, agent_id: &str, tokens: f64) {
@@ -370,11 +386,24 @@ impl InterceptionMiddleware for RateLimiterMiddleware {
 
         match self.limiter.check_and_consume(&self.agent_id, &tool_name) {
             None => {
-                tracing::debug!(
-                    agent_id = %self.agent_id,
-                    server_name = %server,
-                    tool_name = %tool_name,
-                    "rate_limiter: allowed"
+                // ── WARN if quota is >80 % consumed ───────────────────────
+                if let Some(fraction) = self.limiter.server_usage_fraction(&self.agent_id) {
+                    if fraction > 0.8 {
+                        tracing::warn!(
+                            agent_id    = %self.agent_id,
+                            server      = %server,
+                            tool        = %tool_name,
+                            usage_pct   = format!("{:.0}%", fraction * 100.0),
+                            "rate limit approaching: >80% of window quota consumed"
+                        );
+                    }
+                }
+
+                tracing::info!(
+                    agent_id  = %self.agent_id,
+                    server    = %server,
+                    tool      = %tool_name,
+                    "rate limiter: request allowed"
                 );
                 metrics::counter!(
                     crate::metrics::RATE_LIMIT_TOTAL,

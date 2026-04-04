@@ -19,7 +19,24 @@ use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
+use aegis_mcp::McpMessage;
+
 use super::middleware::{block_response, InterceptionMiddleware, InterceptionResult};
+
+/// Extract the tool name from a `tools/call` request, if this message is one.
+fn extract_tool_name(message: &McpMessage) -> Option<String> {
+    if let McpMessage::Request(req) = message {
+        if req.method == "tools/call" {
+            return req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("name"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+        }
+    }
+    None
+}
 
 /// RAII guard that decrements `aegis_active_connections{transport="stdio"}` on drop.
 struct ConnectionGuard;
@@ -303,9 +320,16 @@ async fn write_message_line<W: tokio::io::AsyncWrite + Unpin>(
 
 /// Forward agent→server messages through middleware.
 ///
-/// Reads lines from agent, parses, runs through `on_request`, then:
-/// - Forward/Modify: serialize and write to server_stdin
-/// - Block: write error response back to agent_output (shared)
+/// Each `tools/call` request gets its own tracing span carrying a UUID v7
+/// `trace_id`.  The span propagates through synchronous middleware calls so
+/// that every log event emitted by enforcement, allowlist, and rate-limit
+/// middleware automatically inherits the `trace_id`, `tool`, `agent`, and
+/// `server` fields.
+///
+/// Log levels used:
+/// - **INFO**  — tool call received; tool call forwarded to upstream
+/// - **WARN**  — tool call blocked (any middleware)
+/// - **ERROR** — malformed / unparseable MCP message
 async fn forward_requests_with_middleware<R, W1, W2>(
     mut reader: BufReader<R>,
     mut server_writer: W1,
@@ -336,15 +360,73 @@ where
             continue;
         }
 
-        let message = aegis_mcp::parse_message(trimmed)?;
+        // ── Parse — log malformed messages at ERROR ────────────────────────
+        let message = match aegis_mcp::parse_message(trimmed) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    raw_len = trimmed.len(),
+                    "malformed MCP message from agent"
+                );
+                return Err(e.into());
+            }
+        };
 
-        match middleware.on_request(message) {
+        // ── Per-request span with trace_id ─────────────────────────────────
+        let trace_id = crate::new_trace_id();
+        let tool_name = extract_tool_name(&message);
+        let is_tool_call = tool_name.is_some();
+
+        let span = if let Some(ref tool) = tool_name {
+            tracing::info_span!(
+                "mcp.tool_call",
+                trace_id  = %trace_id,
+                tool      = %tool,
+                // Recorded later by EnforcementMiddleware / AllowlistMiddleware
+                agent     = tracing::field::Empty,
+                server    = tracing::field::Empty,
+                decision  = tracing::field::Empty,
+            )
+        } else {
+            tracing::info_span!("mcp.request", trace_id = %trace_id)
+        };
+
+        // ── Run middleware synchronously inside the span ───────────────────
+        //
+        // `span.in_scope(|| ...)` is correct here: on_request() is sync so
+        // there are no await points while the guard is held.
+        let result = span.in_scope(|| {
+            if is_tool_call {
+                tracing::info!("tool call received");
+            }
+            middleware.on_request(message)
+        });
+
+        // ── Log the decision (still sync, still inside the span) ──────────
+        span.in_scope(|| match &result {
+            InterceptionResult::Forward(_) | InterceptionResult::Modify(_) if is_tool_call => {
+                tracing::Span::current().record("decision", "allow");
+                tracing::info!("tool call allowed — forwarding to upstream");
+            }
+            InterceptionResult::Block(err) if is_tool_call => {
+                tracing::Span::current().record("decision", "block");
+                tracing::warn!(
+                    code   = err.code,
+                    reason = %err.message,
+                    "tool call blocked by gateway"
+                );
+            }
+            _ => {}
+        });
+
+        // ── I/O — happens outside the span (no log events here) ───────────
+        match result {
             InterceptionResult::Forward(msg) | InterceptionResult::Modify(msg) => {
                 write_message_line(&mut server_writer, &msg).await?;
             }
             InterceptionResult::Block(error) => {
-                // Build an error response and send it back to the agent.
-                // For notifications (no id), we silently drop.
+                // Re-parse trimmed bytes to get the original message id.
                 let original = aegis_mcp::parse_message(trimmed)?;
                 if let Some(err_resp) = block_response(&original, error) {
                     let mut out = agent_output.lock().await;
@@ -365,6 +447,9 @@ where
 }
 
 /// Forward server→agent responses through middleware.
+///
+/// Logs at INFO for every upstream response forwarded to the agent.
+/// Logs at ERROR for malformed upstream messages.
 async fn forward_responses_with_middleware<R, W>(
     mut reader: BufReader<R>,
     agent_output: Arc<tokio::sync::Mutex<W>>,
@@ -393,10 +478,17 @@ where
             continue;
         }
 
-        let message = aegis_mcp::parse_message(trimmed)?;
+        let message = match aegis_mcp::parse_message(trimmed) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(error = %e, "malformed MCP message from upstream server");
+                return Err(e.into());
+            }
+        };
 
         match middleware.on_response(message) {
             InterceptionResult::Forward(msg) | InterceptionResult::Modify(msg) => {
+                tracing::info!("upstream response forwarded to agent");
                 let mut out = agent_output.lock().await;
                 write_message_line(&mut *out, &msg).await?;
             }
@@ -415,8 +507,6 @@ where
         })?;
     Ok(())
 }
-
-use aegis_mcp::McpMessage;
 
 #[cfg(test)]
 mod tests {

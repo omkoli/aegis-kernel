@@ -120,6 +120,11 @@ impl InterceptionMiddleware for EnforcementMiddleware {
             token_id: self.token_id,
         };
 
+        // Record the resolved agent and server into the current request span so
+        // they appear in every log event produced during this tool call.
+        tracing::Span::current().record("agent",  self.agent_id.as_str());
+        tracing::Span::current().record("server", self.server_name.as_str());
+
         let call_start = Instant::now();
         let result = self.kernel.evaluate(&tcr);
         let call_elapsed = call_start.elapsed().as_secs_f64();
@@ -129,11 +134,14 @@ impl InterceptionMiddleware for EnforcementMiddleware {
 
         match result.decision {
             Decision::Allow => {
-                tracing::debug!(
-                    tool = %intent.tool_name,
-                    agent = %self.agent_id,
-                    audit_id = %result.audit.request_id,
-                    "enforcement: allowed"
+                tracing::Span::current().record("decision", "allow");
+                tracing::info!(
+                    tool        = %intent.tool_name,
+                    agent       = %self.agent_id,
+                    server      = %self.server_name,
+                    audit_id    = %result.audit.request_id,
+                    latency_us  = result.audit.latency_us,
+                    "enforcement decision: allow"
                 );
                 metrics::counter!(
                     crate::metrics::TOOL_CALLS_TOTAL,
@@ -157,11 +165,17 @@ impl InterceptionMiddleware for EnforcementMiddleware {
                 InterceptionResult::Forward(message)
             }
             Decision::Deny => {
-                tracing::debug!(
-                    tool = %intent.tool_name,
-                    agent = %self.agent_id,
-                    reason = %result.audit.reason,
-                    "enforcement: denied"
+                tracing::Span::current().record("decision", "deny");
+                // WARN: enforcement denial is an operational signal that may
+                // indicate misconfigured tokens or suspicious agent behaviour.
+                tracing::warn!(
+                    tool        = %intent.tool_name,
+                    agent       = %self.agent_id,
+                    server      = %self.server_name,
+                    reason      = %result.audit.reason,
+                    audit_id    = %result.audit.request_id,
+                    latency_us  = result.audit.latency_us,
+                    "enforcement decision: deny"
                 );
                 metrics::counter!(
                     crate::metrics::TOOL_CALLS_TOTAL,

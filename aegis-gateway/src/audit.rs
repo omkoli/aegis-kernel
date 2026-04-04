@@ -166,6 +166,20 @@ pub struct AuditRecord {
 }
 
 impl AuditRecord {
+    /// Override the auto-generated trace ID with a caller-supplied one.
+    ///
+    /// Use this when the trace_id is already known from the request span so
+    /// that the same ID appears in both the audit log and the tracing output:
+    ///
+    /// ```rust,ignore
+    /// let record = AuditRecord::allow(agent, server, tool, params, latency)
+    ///     .with_trace_id(current_trace_id);
+    /// ```
+    pub fn with_trace_id(mut self, trace_id: uuid::Uuid) -> Self {
+        self.trace_id = trace_id;
+        self
+    }
+
     /// Create a new record for an **allowed** tool call.
     pub fn allow(
         agent_id: impl Into<String>,
