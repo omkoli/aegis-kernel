@@ -33,3 +33,7 @@ tokio = { version = "1", features = ["full", "test-util"] }
 serde_json = "1"
 tempfile = "3"
 metrics-exporter-prometheus = { version = "0.15", default-features = false, features = ["http-listener"] }
+# Integration test harness needs direct access to core types and tracing setup
+aegis-core = { path = "../aegis-core" }
+aegis-handle = { path = "../aegis-handle" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

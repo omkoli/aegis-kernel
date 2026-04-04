@@ -61,6 +61,7 @@ dependencies = [
 name = "aegis-gateway"
 version = "0.1.0"
 dependencies = [
+ "aegis-core",
  "aegis-handle",
  "aegis-mcp",
  "bytes",
@@ -84,6 +85,7 @@ dependencies = [
  "tokio-stream",
  "toml",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
