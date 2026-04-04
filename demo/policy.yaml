@@ -1,0 +1,41 @@
+# Aegis demo policy
+# Controls which tools the 'claude' agent may call through the proxy.
+#
+# Edit this file and restart the proxy (or Claude Desktop) to change rules.
+# The proxy reloads the policy on startup — no recompile needed.
+#
+# Tool resources use the convention:  tool://<tool-name>
+#
+# Uncomment / comment entries to allow or deny specific tools.
+
+policies:
+  - name: allow-echo
+    agent: claude
+    resource: "tool://echo"
+    actions: [execute]
+    ttl: 8h
+    max_uses: 100
+
+  - name: allow-add
+    agent: claude
+    resource: "tool://add"
+    actions: [execute]
+    ttl: 8h
+    max_uses: 50
+
+  # get_info is intentionally absent → DENIED by Aegis
+  # Uncomment to allow it:
+  # - name: allow-get-info
+  #   agent: claude
+  #   resource: "tool://get_info"
+  #   actions: [execute]
+  #   ttl: 8h
+
+  # write_file is intentionally absent → DENIED by Aegis
+  # This is a "dangerous" tool — leave it blocked to demonstrate enforcement.
+  # - name: allow-write-file
+  #   agent: claude
+  #   resource: "tool://write_file"
+  #   actions: [execute]
+  #   ttl: 1h
+  #   max_uses: 10

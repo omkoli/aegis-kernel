@@ -128,6 +128,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-proxy"
+version = "0.1.0"
+dependencies = [
+ "aegis-gateway",
+ "aegis-handle",
+ "aegis-mcp",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

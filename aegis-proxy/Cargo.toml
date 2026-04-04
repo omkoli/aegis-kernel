@@ -1,0 +1,17 @@
+[package]
+name    = "aegis-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "Aegis MCP enforcement proxy — wraps any MCP server with real-time policy enforcement"
+
+[[bin]]
+name = "aegis-mcp-proxy"
+path = "src/main.rs"
+
+[dependencies]
+aegis-gateway = { path = "../aegis-gateway" }
+aegis-handle  = { path = "../aegis-handle" }
+aegis-mcp     = { path = "../aegis-mcp" }
+serde_json    = "1"
+tokio         = { version = "1", features = ["full"] }
+uuid          = { version = "1" }
